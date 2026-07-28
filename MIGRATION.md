@@ -26,6 +26,35 @@ let rows = page.data.unwrap().into_vec()?;  // Err(Error::Protocol) for spooled 
 For queries that may spool, page with `Client::pager` (or use `Client::stream` /
 `Client::get_all`), which resolve segments properly.
 
+### Spooling is opt-in and the encoding is typed
+
+Previously the client advertised `json+zstd` as soon as the `spooling` feature
+was compiled in, with no way to disable it, and an invalid encoding string was
+silently replaced by `json+zstd`.
+
+**Before:**
+
+```rust
+// spooling was on by default; this call only changed the encoding
+let client = ClientBuilder::new("user", "localhost")
+    .spooling_encoding("json+lz4")
+    .build()?;
+```
+
+**After:**
+
+```rust
+use trino_rust_client::spooling::SpoolingEncoding;
+
+// no call => no spooling; the coordinator returns rows inline
+let client = ClientBuilder::new("user", "localhost")
+    .spooling_encoding(SpoolingEncoding::JsonLz4)
+    .build()?;
+
+// from runtime config, convert explicitly:
+let encoding = SpoolingEncoding::try_from(cfg.encoding.as_str())?;
+```
+
 ### Transactions (`TransactionId` reshaped)
 
 `TransactionId` previously carried four fixed literals and could not represent a

@@ -247,24 +247,15 @@ impl ClientBuilder {
     }
 
     #[cfg(feature = "spooling")]
-    /// Set the spooling encoding format. Supported values: "json", "json+zstd", "json+lz4".
-    /// Defaults to "json+zstd" if not specified.
-    pub fn spooling_encoding(mut self, encoding: impl ToString) -> Self {
-        let encoding_str = encoding.to_string();
-
-        match SpoolingEncoding::try_from(encoding_str.as_str()) {
-            Ok(_) => {
-                self.session.spooling_encoding = Some(encoding_str);
-            }
-            Err(_) => {
-                tracing::warn!(
-                    "Invalid spooling encoding '{}', using default 'json+zstd'. Valid values: json, json+zstd, json+lz4",
-                    encoding_str
-                );
-                self.session.spooling_encoding = Some("json+zstd".to_string());
-            }
-        }
-
+    /// Advertise Trino's spooling protocol to the coordinator using `encoding`.
+    ///
+    /// Spooling is **opt-in**: without this call the client does not send
+    /// `X-Trino-Query-Data-Encoding`, and the coordinator returns rows inline.
+    ///
+    /// To pick an encoding at runtime, convert first:
+    /// `SpoolingEncoding::try_from(s.as_str())?`.
+    pub fn spooling_encoding(mut self, encoding: SpoolingEncoding) -> Self {
+        self.session.spooling_encoding = Some(encoding);
         self
     }
 
@@ -407,11 +398,11 @@ fn add_session_header(mut builder: RequestBuilder, session: &Session) -> Request
     builder = builder.header(HEADER_TRANSACTION, session.transaction_id.as_header_value());
     builder = builder.header(HEADER_CLIENT_CAPABILITIES, "PATH,PARAMETRIC_DATETIME");
 
-    // Add spooling header when feature is enabled
+    // Advertise the spooling protocol only when explicitly opted in.
     #[cfg(feature = "spooling")]
     {
-        if let Some(encoding) = &session.spooling_encoding {
-            builder = builder.header(HEADER_SPOOLING, encoding);
+        if let Some(encoding) = session.spooling_encoding {
+            builder = builder.header(HEADER_SPOOLING, encoding.as_str());
         }
     }
 

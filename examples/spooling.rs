@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use trino_rust_client::spooling::SpoolingEncoding;
 use trino_rust_client::{ClientBuilder, DataSet, Trino};
 
 #[derive(Trino, Debug, Deserialize, Serialize)]
@@ -14,7 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .port(8080)
         .catalog("memory")
         .schema("default")
-        .spooling_encoding("json+zstd")
+        .spooling_encoding(SpoolingEncoding::JsonZstd)
         .max_concurrent_segments(10)
         .build()?;
 

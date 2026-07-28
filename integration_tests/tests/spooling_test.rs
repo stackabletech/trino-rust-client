@@ -1,14 +1,14 @@
 use futures::FutureExt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use trino_integration_tests::{set_test_fixture, TestFixture};
-use trino_rust_client::spooling::SegmentFetcher;
+use trino_rust_client::spooling::{SegmentFetcher, SpoolingEncoding};
 use trino_rust_client::{Client, ClientBuilder, Row, Trino};
 use uuid::Uuid;
 
 /// Helper to create a client that can resolve 'minio' hostname to localhost
 /// This is needed because Trino running in Docker returns 'http://minio:9000/...'
 /// but the test running on host needs to access it via localhost:9000.
-fn create_test_client(fixture: &TestFixture, encoding: &str) -> Client {
+fn create_test_client(fixture: &TestFixture, encoding: SpoolingEncoding) -> Client {
     let docker_port = 9003;
     let http_client = reqwest::Client::builder()
         .resolve(
@@ -84,7 +84,11 @@ async fn test_spooling_protocol_encodings() {
         &setup_client,
         create_sql_template,
         |table_name| async move {
-            let encodings = vec!["json", "json+zstd", "json+lz4"];
+            let encodings = vec![
+                SpoolingEncoding::Json,
+                SpoolingEncoding::JsonZstd,
+                SpoolingEncoding::JsonLz4,
+            ];
 
             for encoding in encodings {
                 // Create client with custom DNS resolution and specific encoding

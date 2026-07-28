@@ -7,6 +7,8 @@ use reqwest::Url;
 
 use crate::error::*;
 use crate::selected_role::SelectedRole;
+#[cfg(feature = "spooling")]
+use crate::spooling::SpoolingEncoding;
 use crate::transaction::TransactionId;
 
 // TODO remove this when `std::default::default` is stabilized
@@ -36,7 +38,8 @@ pub struct Session {
     pub transaction_id: TransactionId,
     pub client_request_timeout: Duration,
     pub compression_disabled: bool,
-    pub spooling_encoding: Option<String>,
+    #[cfg(feature = "spooling")]
+    pub spooling_encoding: Option<SpoolingEncoding>,
 }
 
 #[derive(Debug)]
@@ -62,7 +65,8 @@ pub(crate) struct SessionBuilder {
     pub(crate) transaction_id: TransactionId,
     pub(crate) client_request_timeout: Duration,
     pub(crate) compression_disabled: bool,
-    pub(crate) spooling_encoding: Option<String>,
+    #[cfg(feature = "spooling")]
+    pub(crate) spooling_encoding: Option<SpoolingEncoding>,
 }
 
 impl SessionBuilder {
@@ -88,7 +92,10 @@ impl SessionBuilder {
             transaction_id: TransactionId::NoTransaction,
             client_request_timeout: Duration::from_secs(30),
             compression_disabled: false,
-            spooling_encoding: Some("json+zstd".to_string()),
+            // Spooling is opt-in: advertising it is what makes the coordinator
+            // spool, so it must take an explicit `spooling_encoding` call.
+            #[cfg(feature = "spooling")]
+            spooling_encoding: None,
         }
     }
 
@@ -120,6 +127,7 @@ impl SessionBuilder {
             transaction_id: self.transaction_id,
             client_request_timeout: self.client_request_timeout,
             compression_disabled: self.compression_disabled,
+            #[cfg(feature = "spooling")]
             spooling_encoding: self.spooling_encoding,
         };
         Ok(ret)
