@@ -139,3 +139,70 @@ async fn test_spooling_protocol_encodings() {
     )
     .await;
 }
+
+/// The regression this branch fixes: paging manually over a spooled result.
+///
+/// Before the fix, `Client::get`/`get_next` + `QueryResultData::into_vec`
+/// returned **zero rows and no error** for anything the coordinator spooled.
+/// The coordinator here is configured to spool aggressively
+/// (`protocol.spooling.inlining.max-rows=1`), so every page is spooled.
+#[tokio::test]
+async fn test_pager_reads_spooled_rows_incrementally() {
+    let fixture = set_test_fixture("test_pager_reads_spooled_rows_incrementally");
+
+    let setup_client = ClientBuilder::new("test", &fixture.coordinator_host)
+        .port(fixture.coordinator_port)
+        .catalog("memory")
+        .schema("default")
+        .build()
+        .expect("Failed to create setup client");
+
+    let create_sql_template = r#"
+        CREATE TABLE {} AS
+        SELECT
+            CAST(n AS BIGINT) AS id,
+            CONCAT('user_', CAST(n AS VARCHAR)) AS name
+        FROM UNNEST(SEQUENCE(1, 1000)) AS t(n)
+    "#;
+
+    with_temp_table(&setup_client, create_sql_template, |table_name| async move {
+        let client = create_test_client(&fixture, SpoolingEncoding::JsonZstd);
+        let select_sql = format!("SELECT * FROM {} ORDER BY id", table_name);
+
+        let mut pager = client
+            .pager::<Row>(select_sql)
+            .await
+            .expect("pager should submit the query and resolve the schema");
+
+        // The schema and query id are available before any row arrives — this is
+        // what a driver needs to stay cancellable while streaming.
+        assert!(
+            !pager.query_id().is_empty(),
+            "query id must be exposed for cancellation"
+        );
+        assert_eq!(pager.columns().len(), 2, "schema resolved up front");
+
+        let mut total = 0usize;
+        let mut pages = 0usize;
+        let mut first_id: Option<i64> = None;
+        let mut last_id: Option<i64> = None;
+
+        while let Some(rows) = pager.next_page().await.expect("page must decode") {
+            pages += 1;
+            for row in &rows {
+                let id = row.value().first().unwrap().as_i64().unwrap();
+                if first_id.is_none() {
+                    first_id = Some(id);
+                }
+                last_id = Some(id);
+            }
+            total += rows.len();
+        }
+
+        assert_eq!(total, 1000, "every spooled row must be delivered");
+        assert!(pages > 0, "rows must arrive incrementally, page by page");
+        assert_eq!(first_id, Some(1), "first row mismatch");
+        assert_eq!(last_id, Some(1000), "last row mismatch");
+    })
+    .await;
+}
