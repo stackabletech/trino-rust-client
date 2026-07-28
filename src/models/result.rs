@@ -2,10 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use super::*;
-#[cfg(feature = "spooling")]
 use crate::error::Error;
 #[cfg(feature = "spooling")]
-use crate::spooling::{decode_inline_segment, Segment};
+use crate::spooling::Segment;
 use crate::Trino;
 
 /// Query result data can be either Direct (inline array) or Spooled (compressed segments)
@@ -20,24 +19,36 @@ pub enum QueryResultData<T: Trino> {
     Direct(Vec<T>),
 }
 
+/// Why a spooled page cannot be decoded from this type. The message differs by
+/// feature so the caller is told the actionable thing in each build.
+#[cfg(feature = "spooling")]
+const SPOOLED_UNSUPPORTED: &str =
+    "spooled query data cannot be decoded from QueryResultData: its segments may \
+     live in object storage and decoding needs the query's column metadata, \
+     neither of which this type has. Use Client::pager, Client::stream or \
+     Client::get_all.";
+
+#[cfg(not(feature = "spooling"))]
+const SPOOLED_UNSUPPORTED: &str =
+    "server sent spooled data but the 'spooling' feature is not enabled. Add \
+     features = [\"spooling\"] to your trino-rust-client dependency in Cargo.toml.";
+
 impl<T> QueryResultData<T>
 where
     T: Trino,
     for<'de> T: serde::Deserialize<'de>,
 {
-    /// Convert into Vec for both Direct and Spooled variants
-    pub fn into_vec(self) -> Vec<T> {
+    /// Rows carried inline by the Direct protocol.
+    ///
+    /// Spooled pages return [`Error::Protocol`] rather than rows. Resolving them
+    /// requires the HTTP client (segments may live in object storage) and the
+    /// query's column metadata, and this type has neither — use
+    /// [`Client::pager`](crate::Client::pager), [`Client::stream`](crate::Client::stream)
+    /// or [`Client::get_all`](crate::Client::get_all) for a query that may spool.
+    pub fn into_vec(self) -> Result<Vec<T>, Error> {
         match self {
-            QueryResultData::Direct(data) => data,
-            #[cfg(feature = "spooling")]
-            QueryResultData::Spooled(spooled) => spooled.parse_segments().unwrap_or_else(|e| {
-                tracing::error!("Failed to parse spooled segments: {}", e);
-                Vec::new()
-            }),
-            #[cfg(not(feature = "spooling"))]
-            QueryResultData::Spooled(_) => {
-                panic!("Spooling feature not enabled")
-            }
+            QueryResultData::Direct(data) => Ok(data),
+            QueryResultData::Spooled(_) => Err(Error::Protocol(SPOOLED_UNSUPPORTED.to_string())),
         }
     }
 }
@@ -49,39 +60,6 @@ pub struct SpooledData {
     pub encoding: String,
     #[cfg(feature = "spooling")]
     pub segments: Vec<Segment>,
-}
-
-#[cfg(feature = "spooling")]
-impl SpooledData {
-    /// Parse all segments and return the rows
-    fn parse_segments<T>(&self) -> Result<Vec<T>, Error>
-    where
-        for<'de> T: Trino + serde::Deserialize<'de>,
-    {
-        let mut all_rows = Vec::new();
-
-        for (idx, segment) in self.segments.iter().enumerate() {
-            match segment {
-                Segment::Inlined { data, .. } => {
-                    let decompressed = decode_inline_segment(data, &self.encoding)?;
-                    let rows: Vec<T> = serde_json::from_str(&decompressed).map_err(|e| {
-                        Error::Decode(format!("Failed to parse segment {} JSON: {}", idx, e))
-                    })?;
-                    all_rows.reserve(rows.len());
-                    for row in rows {
-                        all_rows.push(row);
-                    }
-                }
-                Segment::Spooled { .. } => {
-                    return Err(Error::Protocol(
-                        "Remote spooled segments not supported in this code path. Use Client::get_all() instead.".to_string(),
-                    ));
-                }
-            }
-        }
-
-        Ok(all_rows)
-    }
 }
 
 /// Metadata about spooled data segments
@@ -118,52 +96,42 @@ pub struct QueryResult<T: Trino> {
 }
 
 #[cfg(test)]
-#[cfg(feature = "spooling")]
 mod tests {
     use super::*;
-    use base64::prelude::*;
+    use crate::error::Error;
+    use crate::Row;
 
     #[test]
-    fn test_parse_segments_multiple_inline() {
-        let rows_json1 = r#"[["alice",1],["bob",2]]"#;
-        let rows_json2 = r#"[["charlie",3]]"#;
+    fn into_vec_returns_direct_rows() {
+        let data: QueryResultData<Row> =
+            serde_json::from_str(r#"[["alice",1],["bob",2]]"#).unwrap();
+        let rows = data.into_vec().expect("direct data decodes");
+        assert_eq!(rows.len(), 2);
+    }
 
-        let encoded1 = BASE64_STANDARD.encode(rows_json1.as_bytes());
-        let encoded2 = BASE64_STANDARD.encode(rows_json2.as_bytes());
+    // A remote segment cannot be fetched here: this type has no HTTP client.
+    #[test]
+    fn into_vec_errors_on_remote_spooled_page() {
+        let json = r#"{"encoding":"json+zstd","segments":[
+            {"type":"spooled","uri":"http://minio:9000/s/0","metadata":{}}
+        ]}"#;
+        let data: QueryResultData<Row> = serde_json::from_str(json).unwrap();
+        assert!(matches!(data, QueryResultData::Spooled(_)));
+        assert!(
+            matches!(data.into_vec(), Err(Error::Protocol(_))),
+            "spooled pages must report a protocol error, never an empty Vec"
+        );
+    }
 
-        let segment1_json = format!(
-            r#"{{"type":"inline","data":"{}","metadata":{{}}}}"#,
-            encoded1
-        );
-        let segment2_json = format!(
-            r#"{{"type":"inline","data":"{}","metadata":{{}}}}"#,
-            encoded2
-        );
-
-        let segment1: Segment = serde_json::from_str(&segment1_json).unwrap();
-        let segment2: Segment = serde_json::from_str(&segment2_json).unwrap();
-
-        let spooled = SpooledData {
-            encoding: "json".to_string(),
-            segments: vec![segment1, segment2],
-        };
-
-        let rows = spooled.parse_segments::<crate::Row>().unwrap();
-        assert_eq!(rows.len(), 3);
-        assert_eq!(
-            rows[0].value()[0],
-            serde_json::Value::String("alice".to_string())
-        );
-        assert_eq!(rows[0].value()[1], serde_json::Value::Number(1.into()));
-        assert_eq!(
-            rows[1].value()[0],
-            serde_json::Value::String("bob".to_string())
-        );
-        assert_eq!(rows[1].value()[1], serde_json::Value::Number(2.into()));
-        assert_eq!(
-            rows[2].value()[0],
-            serde_json::Value::String("charlie".to_string())
-        );
-        assert_eq!(rows[2].value()[1], serde_json::Value::Number(3.into()));
+    // Inline segments error too: decoding them here would bypass TrinoTy and
+    // could disagree with the column-directed decoding get_all/stream use.
+    #[test]
+    fn into_vec_errors_on_inline_spooled_page() {
+        let json = r#"{"encoding":"json","segments":[
+            {"type":"inline","data":"W1siYWxpY2UiLDFdXQ==","metadata":{}}
+        ]}"#;
+        let data: QueryResultData<Row> = serde_json::from_str(json).unwrap();
+        assert!(matches!(data, QueryResultData::Spooled(_)));
+        assert!(matches!(data.into_vec(), Err(Error::Protocol(_))));
     }
 }

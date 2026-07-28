@@ -5,6 +5,27 @@ for the full list of changes.
 
 ## 0.11.0 → 0.12.0
 
+### `QueryResultData::into_vec` returns `Result`
+
+It previously returned `Vec<T>`, turning any spooled-segment failure into an
+empty result — silent data loss — and panicking when the `spooling` feature was
+off. It now reports instead.
+
+**Before:**
+
+```rust
+let rows = page.data.unwrap().into_vec();   // silently empty for spooled data
+```
+
+**After:**
+
+```rust
+let rows = page.data.unwrap().into_vec()?;  // Err(Error::Protocol) for spooled data
+```
+
+For queries that may spool, page with `Client::pager` (or use `Client::stream` /
+`Client::get_all`), which resolve segments properly.
+
 ### Transactions (`TransactionId` reshaped)
 
 `TransactionId` previously carried four fixed literals and could not represent a

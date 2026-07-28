@@ -69,14 +69,15 @@ fn test_spooled_data_deserialization() {
     let result: QueryResult<TestRecord> = serde_json::from_str(json).unwrap();
 
     assert!(matches!(result.data, Some(QueryResultData::Spooled(_))));
-    assert_eq!(result.columns.unwrap().len(), 2);
+    assert_eq!(result.columns.as_ref().unwrap().len(), 2);
 
-    let records = result.data.unwrap().into_vec();
-    assert_eq!(records.len(), 2);
-    assert_eq!(records[0].id, 1);
-    assert_eq!(records[0].name, "alice");
-    assert_eq!(records[1].id, 2);
-    assert_eq!(records[1].name, "bob");
+    // Decoding spooled rows requires a Client (segment fetching) and the column
+    // metadata; QueryResultData has neither, so it reports rather than guesses.
+    // Task 4 adds the pager-based test that actually decodes these rows.
+    assert!(matches!(
+        result.data.unwrap().into_vec(),
+        Err(trino_rust_client::error::Error::Protocol(_))
+    ));
 }
 
 #[test]
