@@ -23,6 +23,7 @@ use crate::models::Column;
 use crate::models::QueryResultData;
 #[cfg(feature = "spooling")]
 use crate::models::SpooledData;
+use crate::pager::QueryPager;
 use crate::retry::RetryPolicy;
 use crate::selected_role::SelectedRole;
 use crate::session::{Session, SessionBuilder};
@@ -520,10 +521,39 @@ fn need_retry_submit(e: &Error) -> bool {
 
 /// Everything needed to fire a best-effort query cancellation from
 /// [`RowStream`]'s `Drop`, without borrowing the [`Client`].
-struct CancelOnDrop {
-    client: reqwest::Client,
-    url: String,
-    auth: Option<Auth>,
+pub(crate) struct CancelOnDrop {
+    pub(crate) client: reqwest::Client,
+    pub(crate) url: String,
+    pub(crate) auth: Option<Auth>,
+}
+
+impl CancelOnDrop {
+    /// Best-effort `DELETE` of the query. Requires an active Tokio runtime;
+    /// silently does nothing if there is none (e.g. drop outside a runtime).
+    pub(crate) fn spawn_fire(self) {
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let mut req = self.client.delete(&self.url);
+                if let Some(auth) = &self.auth {
+                    req = match auth {
+                        Auth::Basic(u, p) => req.basic_auth(u, p.as_ref()),
+                        Auth::Jwt(t) => req.bearer_auth(t),
+                        // Only ever the cached token: a fire-and-forget cancel must
+                        // not block on an interactive login, so unlike
+                        // `Client::auth_req` this never runs the OAuth2 flow. With no
+                        // cached token — or an expired one — the cancellation is
+                        // simply lost and the coordinator times the query out on its
+                        // own.
+                        Auth::OAuth2(state) => match state.cached_token() {
+                            Some(t) => req.bearer_auth(t),
+                            None => req,
+                        },
+                    };
+                }
+                let _ = req.send().await;
+            });
+        }
+    }
 }
 
 /// A lazy stream of query rows, with the result columns resolved up front.
@@ -582,28 +612,7 @@ impl<T> Drop for RowStream<'_, T> {
         let Some(cancel) = self.cancel.take() else {
             return;
         };
-        // Fire-and-forget; only possible from within a running Tokio runtime.
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                let mut req = cancel.client.delete(&cancel.url);
-                if let Some(auth) = &cancel.auth {
-                    req = match auth {
-                        Auth::Basic(u, p) => req.basic_auth(u, p.as_ref()),
-                        Auth::Jwt(t) => req.bearer_auth(t),
-                        // Only ever the cached token: a `Drop` must not block on
-                        // an interactive login, so unlike `Client::auth_req` this
-                        // never runs the OAuth2 flow. With no cached token — or an
-                        // expired one — the cancellation is simply lost and the
-                        // coordinator times the query out on its own.
-                        Auth::OAuth2(state) => match state.cached_token() {
-                            Some(t) => req.bearer_auth(t),
-                            None => req,
-                        },
-                    };
-                }
-                let _ = req.send().await;
-            });
-        }
+        cancel.spawn_fire();
     }
 }
 
@@ -1156,7 +1165,7 @@ impl Client {
         self.retry.backoff()
     }
 
-    async fn get_retry<T>(&self, sql: String) -> Result<QueryResult<T>>
+    pub(crate) async fn get_retry<T>(&self, sql: String) -> Result<QueryResult<T>>
     where
         T: Trino + 'static,
         for<'de> T: serde::Deserialize<'de>,
@@ -1170,7 +1179,7 @@ impl Client {
             .await
     }
 
-    async fn get_next_retry<T>(&self, url: &str) -> Result<QueryResult<T>>
+    pub(crate) async fn get_next_retry<T>(&self, url: &str) -> Result<QueryResult<T>>
     where
         T: Trino + 'static,
         for<'de> T: serde::Deserialize<'de>,
@@ -1182,6 +1191,37 @@ impl Client {
             .retry(self.retry_policy())
             .when(need_retry_fetch)
             .await
+    }
+
+    /// Everything needed to fire a best-effort cancellation for `query_id`
+    /// without borrowing `self`.
+    pub(crate) fn cancel_on_drop(&self, query_id: &str) -> CancelOnDrop {
+        CancelOnDrop {
+            client: self.client.clone(),
+            url: format!("{}v1/query/{}", self.url, query_id),
+            auth: self.auth.clone(),
+        }
+    }
+
+    /// Submit `sql` and return a [`QueryPager`] that yields one page of rows at
+    /// a time.
+    ///
+    /// Use this when you need rows incrementally *and* need the query to stay
+    /// cancellable — the pager exposes [`QueryPager::query_id`] and
+    /// [`QueryPager::cancel`]. For simple cases prefer [`get_all`](Self::get_all)
+    /// (buffers everything) or [`stream`](Self::stream) (row-at-a-time).
+    ///
+    /// Unlike hand-rolled paging over [`get`](Self::get) / [`get_next`](Self::get_next),
+    /// this resolves spooled result data correctly.
+    #[tracing::instrument(skip_all, fields(query_id = tracing::field::Empty))]
+    pub async fn pager<T>(&self, sql: impl Into<String>) -> Result<QueryPager<'_, T>>
+    where
+        T: Trino + 'static,
+        for<'de> T: serde::Deserialize<'de>,
+    {
+        let pager = QueryPager::new(self, sql.into()).await?;
+        tracing::Span::current().record("query_id", pager.query_id());
+        Ok(pager)
     }
 
     /// Submit `sql` and return the first result page.

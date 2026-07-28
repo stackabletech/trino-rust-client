@@ -79,6 +79,7 @@ pub mod error;
 
 mod header;
 pub mod models;
+pub mod pager;
 #[cfg(feature = "spooling")]
 pub mod spooling;
 
@@ -92,5 +93,6 @@ pub mod types;
 
 pub use client::*;
 pub use models::*;
+pub use pager::QueryPager;
 pub use trino_rust_client_macros::*;
 pub use types::*;
