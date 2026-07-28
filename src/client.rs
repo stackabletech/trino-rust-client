@@ -20,7 +20,6 @@ use crate::error::TrinoRetryResult;
 use crate::error::{Error, Result};
 use crate::header::*;
 use crate::models::Column;
-use crate::models::QueryResultData;
 #[cfg(feature = "spooling")]
 use crate::models::SpooledData;
 use crate::pager::QueryPager;
@@ -731,165 +730,22 @@ impl Client {
         T: Trino + 'static,
         for<'de> T: serde::Deserialize<'de> + serde::Serialize,
     {
-        let res = self.get_retry(sql.into()).await?;
-        tracing::Span::current().record("query_id", res.id.as_str());
+        // One paging implementation for every entry point: the pager primes the
+        // query, caches the column metadata and decodes each page, so a query
+        // whose pages switch between the Direct and Spooled protocols works.
+        let mut pager = QueryPager::new(self, sql.into()).await?;
+        tracing::Span::current().record("query_id", pager.query_id());
 
-        // Store columns from responses (used for Direct protocol DataSet construction)
-        let mut columns = res.columns;
-
-        match res.data {
-            Some(QueryResultData::Direct(rows)) => {
-                // Direct protocol: accumulate Vec<T>, convert to DataSet at the end
-                let mut all_rows = rows;
-
-                let mut next = res.next_uri;
-                while let Some(url) = &next {
-                    let mut res = self.get_next_retry(url).await?;
-                    next = res.next_uri;
-
-                    // Collect columns from any response that has them
-                    if columns.is_none() {
-                        columns = res.columns.take();
-                    }
-
-                    if let Some(error) = res.error {
-                        return Err(error.into());
-                    }
-
-                    if let Some(data) = res.data {
-                        match data {
-                            QueryResultData::Direct(rows) => {
-                                all_rows.extend(rows);
-                            }
-                            #[cfg(feature = "spooling")]
-                            QueryResultData::Spooled(_) => {
-                                return Err(Error::Protocol(
-                                    "Cannot mix Direct and Spooled protocols in same query".to_string(),
-                                ));
-                            }
-                            #[cfg(not(feature = "spooling"))]
-                            QueryResultData::Spooled(_) => {
-                                return Err(Error::Protocol(
-                                    "Server sent spooled data but 'spooling' feature is not enabled. \
-                                     Add features = [\"spooling\"] to your trino-rust-client dependency in Cargo.toml.".to_string(),
-                                ));
-                            }
-                        }
-                    }
-                }
-
-                build_dataset(all_rows, columns)
-            }
-            #[cfg(feature = "spooling")]
-            Some(QueryResultData::Spooled(spooled)) => {
-                let mut dataset = self
-                    .fetch_spooled_data::<T>(spooled, columns.clone())
-                    .await?;
-
-                let mut next = res.next_uri;
-                while let Some(url) = &next {
-                    let mut res = self.get_next_retry::<T>(url).await?;
-                    next = res.next_uri;
-
-                    if columns.is_none() {
-                        columns = res.columns.take();
-                    }
-
-                    if let Some(error) = res.error {
-                        return Err(error.into());
-                    }
-
-                    if let Some(data) = res.data {
-                        match data {
-                            QueryResultData::Direct(_) => {
-                                return Err(Error::Protocol(
-                                    "Cannot mix Direct and Spooled protocols in same query".to_string(),
-                                ));
-                            }
-                            QueryResultData::Spooled(spooled) => {
-                                tracing::info!("🗄️  Received SPOOLED protocol data - fetching from S3/MinIO");
-                                let cols_for_spooled = columns.clone().or_else(|| res.columns.take());
-                                let next_dataset = self
-                                    .fetch_spooled_data::<T>(spooled, cols_for_spooled)
-                                    .await?;
-                                dataset.merge(next_dataset);
-                            }
-                        }
-                    }
-                }
-
-                Ok(dataset)
-            }
-            #[cfg(not(feature = "spooling"))]
-            Some(QueryResultData::Spooled(_)) => {
-                Err(Error::Protocol(
-                    "Server sent spooled data but 'spooling' feature is not enabled. \
-                     Add features = [\"spooling\"] to your trino-rust-client dependency in Cargo.toml.".to_string(),
-                ))
-            }
-            None => {
-                // No initial data, wait for next response to detect protocol
-                let mut next = res.next_uri;
-                let mut protocol_detected = false;
-                let mut all_rows: Vec<T> = Vec::new();
-                #[cfg(feature = "spooling")]
-                let mut dataset: Option<DataSet<T>> = None;
-
-                while let Some(url) = &next {
-                    let mut res = self.get_next_retry::<T>(url).await?;
-                    next = res.next_uri;
-
-                    if columns.is_none() {
-                        columns = res.columns.take();
-                    }
-
-                    if let Some(error) = res.error {
-                        return Err(error.into());
-                    }
-
-                    if let Some(data) = res.data {
-                        match data {
-                            QueryResultData::Direct(rows) => {
-                                if !protocol_detected {
-                                    protocol_detected = true;
-                                }
-                                all_rows.extend(rows);
-                            }
-                            #[cfg(feature = "spooling")]
-                            QueryResultData::Spooled(spooled) => {
-                                if !protocol_detected {
-                                    protocol_detected = true;
-                                    let cols_for_spooled = columns.clone().or_else(|| res.columns.take());
-                                    dataset = Some(self.fetch_spooled_data::<T>(spooled, cols_for_spooled).await?);
-                                } else {
-                                    let cols_for_spooled = columns.clone().or_else(|| res.columns.take());
-                                    let next_dataset = self.fetch_spooled_data::<T>(spooled, cols_for_spooled).await?;
-                                    if let Some(ref mut ds) = dataset {
-                                        ds.merge(next_dataset);
-                                    }
-                                }
-                            }
-                            #[cfg(not(feature = "spooling"))]
-                            QueryResultData::Spooled(_) => {
-                                return Err(Error::Protocol(
-                                    "Server sent spooled data but 'spooling' feature is not enabled. \
-                                     Add features = [\"spooling\"] to your trino-rust-client dependency in Cargo.toml.".to_string(),
-                                ));
-                            }
-                        }
-                    }
-                }
-
-                #[cfg(feature = "spooling")]
-                if let Some(ds) = dataset {
-                    Ok(ds)
-                } else {
-                    build_dataset(all_rows, columns)
-                }
-                #[cfg(not(feature = "spooling"))]
-                build_dataset(all_rows, columns)
-            }
+        let mut all_rows: Vec<T> = Vec::new();
+        while let Some(rows) = pager.next_page().await? {
+            all_rows.extend(rows);
         }
+
+        let columns = match pager.columns() {
+            [] => None,
+            cols => Some(cols.to_vec()),
+        };
+        build_dataset(all_rows, columns)
     }
 
     #[cfg(feature = "spooling")]

@@ -266,3 +266,53 @@ async fn pager_handles_direct_and_spooled_in_one_query() {
     }
     assert_eq!(total, 5);
 }
+
+/// `get_all` used to reject a query whose pages switch protocol.
+#[cfg(feature = "spooling")]
+#[tokio::test]
+async fn get_all_accepts_mixed_protocols() {
+    let server = MockServer::start().await;
+    let uri = server.uri();
+
+    mount(
+        &server,
+        "POST",
+        "",
+        json!({
+            "id": "q", "infoUri": format!("{uri}/ui"),
+            "nextUri": format!("{uri}/v1/statement/q/1"),
+            "columns": columns(), "data": [[1],[2]],
+            "stats": stats(), "warnings": []
+        }),
+    )
+    .await;
+    mount(
+        &server,
+        "GET",
+        "/v1/statement/q/1",
+        json!({
+            "id": "q", "infoUri": format!("{uri}/ui"),
+            "columns": columns(),
+            "data": {"encoding": "json", "segments": [
+                {"type": "spooled", "uri": format!("{uri}/segments/0"), "metadata": {}}
+            ]},
+            "stats": stats(), "warnings": []
+        }),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/segments/0"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([[3],[4],[5]])))
+        .mount(&server)
+        .await;
+
+    let (host, port) = server_addr(&server).await;
+    let cli = ClientBuilder::new("u", host)
+        .port(port)
+        .spooling_encoding(trino_rust_client::spooling::SpoolingEncoding::Json)
+        .build()
+        .unwrap();
+
+    let ds = cli.get_all::<Row>("SELECT n FROM t").await.unwrap();
+    assert_eq!(ds.len(), 5);
+}
