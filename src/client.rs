@@ -311,13 +311,18 @@ impl ClientBuilder {
         let client = client_builder.build()?;
 
         #[cfg(feature = "spooling")]
-        let segment_fetcher = self.segment_fetcher.unwrap_or_else(|| {
-            let mut fetcher = SegmentFetcher::new(client.clone());
-            if let Some(max_concurrent) = self.max_concurrent_segments {
-                fetcher = fetcher.with_max_concurrent(max_concurrent);
-            }
+        let segment_fetcher = {
+            let mut fetcher = self.segment_fetcher.unwrap_or_else(|| {
+                let mut f = SegmentFetcher::new(client.clone());
+                if let Some(max_concurrent) = self.max_concurrent_segments {
+                    f = f.with_max_concurrent(max_concurrent);
+                }
+                f
+            });
+            // Applies to a caller-supplied fetcher too: one policy per client.
+            fetcher.set_retry_policy(retry.clone());
             fetcher
-        });
+        };
 
         let cli = Client {
             auth: self.auth,
@@ -493,7 +498,7 @@ fn transient_status(code: &StatusCode) -> bool {
 /// `GET nextUri`). Any transient failure is safe to retry: gateway/availability
 /// responses (HTTP 502/503/504) and low-level connect/timeout errors. Query,
 /// decode, protocol and other errors are terminal.
-fn need_retry_fetch(e: &Error) -> bool {
+pub(crate) fn need_retry_fetch(e: &Error) -> bool {
     match e {
         Error::HttpError(e) => {
             e.is_timeout() || e.is_connect() || e.status().as_ref().is_some_and(transient_status)

@@ -2,9 +2,12 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::thread;
 
+use crate::client::need_retry_fetch;
 use crate::error::{Error, Result};
+use crate::retry::RetryPolicy;
 use crate::spooling::segment::Segment;
 use crate::spooling::segment::Segment::Inlined;
+use backon::Retryable;
 use base64::{engine::general_purpose, Engine as _};
 use flate2::read::GzDecoder;
 use futures::stream::{self, StreamExt};
@@ -22,6 +25,7 @@ fn default_max_concurrent_segments() -> usize {
 pub struct SegmentFetcher {
     http_client: Client,
     max_concurrent_segments: usize,
+    retry: RetryPolicy,
 }
 
 // Fetcher for segments
@@ -30,7 +34,14 @@ impl SegmentFetcher {
         Self {
             http_client,
             max_concurrent_segments: default_max_concurrent_segments(),
+            retry: RetryPolicy::default(),
         }
+    }
+
+    /// Adopt the owning client's retry policy. One policy governs both the
+    /// coordinator page fetch and the segment fetches behind it.
+    pub(crate) fn set_retry_policy(&mut self, policy: RetryPolicy) {
+        self.retry = policy;
     }
 
     /// Configure the maximum number of concurrent segment fetches
@@ -50,9 +61,15 @@ impl SegmentFetcher {
                 headers,
                 ..
             } => {
-                let data = self.fetch_spooled_segment(uri, headers.as_ref()).await?;
+                // Retry per segment, not per batch: a batch-level retry would
+                // re-fetch and re-ack every sibling segment on one failure.
+                let fetch = || async { self.fetch_spooled_segment(uri, headers.as_ref()).await };
+                let data = fetch
+                    .retry(self.retry.backoff())
+                    .when(need_retry_fetch)
+                    .await?;
 
-                // Acknowledge the segment if ackUri is provided
+                // Acknowledgement is best-effort and deliberately not retried.
                 if let Some(ack) = ack_uri {
                     if let Err(e) = self.acknowledge_segment(ack, headers.as_ref()).await {
                         tracing::warn!("Failed to acknowledge segment {}: {}", ack, e);
@@ -126,12 +143,10 @@ impl SegmentFetcher {
         // NOTE: For local Docker testing, the client must be able to resolve
         // the storage hostname (e.g., 'minio') used in the URI. In production,
         // clients and Trino should share the same network view of storage endpoints.
-        let response = request.send().await.map_err(|e| {
-            Error::InternalError(format!(
-                "Failed to fetch remote segment from {}: {}",
-                uri, e
-            ))
-        })?;
+        // Keep the reqwest error class intact: the retry predicate matches on
+        // `Error::HttpError` / `Error::HttpNotOk`, so wrapping this in a
+        // stringly `InternalError` would silently make every failure terminal.
+        let response = request.send().await.map_err(Error::from)?;
 
         // Check status
         if !response.status().is_success() {

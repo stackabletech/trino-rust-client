@@ -316,3 +316,103 @@ async fn get_all_accepts_mixed_protocols() {
     let ds = cli.get_all::<Row>("SELECT n FROM t").await.unwrap();
     assert_eq!(ds.len(), 5);
 }
+
+#[cfg(feature = "spooling")]
+async fn mount_single_spooled_page(server: &MockServer) {
+    let uri = server.uri();
+    mount(
+        server,
+        "POST",
+        "",
+        json!({
+            "id": "q", "infoUri": format!("{uri}/ui"),
+            "columns": columns(),
+            "data": {"encoding": "json", "segments": [
+                {"type": "spooled", "uri": format!("{uri}/segments/0"), "metadata": {}}
+            ]},
+            "stats": stats(), "warnings": []
+        }),
+    )
+    .await;
+}
+
+#[cfg(feature = "spooling")]
+fn fast_retry_client(host: String, port: u16) -> trino_rust_client::client::Client {
+    use std::time::Duration;
+    use trino_rust_client::retry::RetryPolicy;
+    ClientBuilder::new("u", host)
+        .port(port)
+        .spooling_encoding(trino_rust_client::spooling::SpoolingEncoding::Json)
+        .retry_policy(RetryPolicy {
+            max_retries: 3,
+            min_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(5),
+            jitter: false,
+        })
+        .build()
+        .unwrap()
+}
+
+/// A transient 503 from object storage must not fail the page.
+#[cfg(feature = "spooling")]
+#[tokio::test]
+async fn segment_fetch_retries_transient_failure() {
+    let server = MockServer::start().await;
+    mount_single_spooled_page(&server).await;
+
+    Mock::given(method("GET"))
+        .and(path("/segments/0"))
+        .respond_with(ResponseTemplate::new(503))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/segments/0"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([[1],[2]])))
+        .mount(&server)
+        .await;
+
+    let (host, port) = server_addr(&server).await;
+    let cli = fast_retry_client(host, port);
+    let mut pager = cli.pager::<Row>("SELECT n FROM t").await.unwrap();
+
+    let rows = pager.next_page().await.expect("503 must be retried");
+    assert_eq!(rows.unwrap().len(), 2);
+
+    let attempts = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.url.path() == "/segments/0")
+        .count();
+    assert_eq!(attempts, 2, "one failure then one success");
+}
+
+/// An expired presigned URL is terminal — retrying it just wastes time.
+#[cfg(feature = "spooling")]
+#[tokio::test]
+async fn segment_fetch_does_not_retry_forbidden() {
+    let server = MockServer::start().await;
+    mount_single_spooled_page(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/segments/0"))
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&server)
+        .await;
+
+    let (host, port) = server_addr(&server).await;
+    let cli = fast_retry_client(host, port);
+    let mut pager = cli.pager::<Row>("SELECT n FROM t").await.unwrap();
+
+    assert!(pager.next_page().await.is_err(), "403 must fail the page");
+
+    let attempts = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.url.path() == "/segments/0")
+        .count();
+    assert_eq!(attempts, 1, "403 must not be retried");
+}
