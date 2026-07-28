@@ -119,7 +119,34 @@ where
                 continue;
             };
 
-            let rows = self.decode(data).await?;
+            // Decoded inline rather than in a `&self` helper: holding a shared
+            // borrow of `self` across the await would require `T: Sync`, which
+            // would in turn make `RowStream` (built on this) non-`Send`.
+            let rows = match data {
+                QueryResultData::Direct(rows) => rows,
+                #[cfg(feature = "spooling")]
+                QueryResultData::Spooled(spooled) => {
+                    // Decoding is column-directed, so hand over the cached metadata.
+                    let columns = if self.columns.is_empty() {
+                        None
+                    } else {
+                        Some(self.columns.clone())
+                    };
+                    let client = self.client;
+                    let dataset = client.fetch_spooled_data::<T>(spooled, columns).await?;
+                    dataset.into_vec()
+                }
+                #[cfg(not(feature = "spooling"))]
+                QueryResultData::Spooled(_) => {
+                    return Err(Error::Protocol(
+                        "server sent spooled data but the 'spooling' feature is not enabled. \
+                         Add features = [\"spooling\"] to your trino-rust-client dependency \
+                         in Cargo.toml."
+                            .to_string(),
+                    ))
+                }
+            };
+
             if rows.is_empty() {
                 continue;
             }
@@ -127,28 +154,10 @@ where
         }
     }
 
-    async fn decode(&self, data: QueryResultData<T>) -> Result<Vec<T>> {
-        match data {
-            QueryResultData::Direct(rows) => Ok(rows),
-            #[cfg(feature = "spooling")]
-            QueryResultData::Spooled(spooled) => {
-                // Decoding is column-directed, so hand over the cached metadata.
-                let columns = if self.columns.is_empty() {
-                    None
-                } else {
-                    Some(self.columns.clone())
-                };
-                let dataset = self.client.fetch_spooled_data::<T>(spooled, columns).await?;
-                Ok(dataset.into_vec())
-            }
-            #[cfg(not(feature = "spooling"))]
-            QueryResultData::Spooled(_) => Err(Error::Protocol(
-                "server sent spooled data but the 'spooling' feature is not enabled. \
-                 Add features = [\"spooling\"] to your trino-rust-client dependency \
-                 in Cargo.toml."
-                    .to_string(),
-            )),
-        }
+    /// Hand cancellation ownership to a wrapper (e.g. [`RowStream`](crate::RowStream)),
+    /// leaving this pager's own `Drop` inert.
+    pub(crate) fn take_cancel(&mut self) -> Option<CancelOnDrop> {
+        self.cancel.take()
     }
 
     /// Cancel the query on the coordinator and report whether it succeeded.

@@ -528,29 +528,32 @@ pub(crate) struct CancelOnDrop {
 }
 
 impl CancelOnDrop {
+    /// The cancellation `DELETE`, with authentication applied.
+    ///
+    /// This runs detached from the [`Client`], so unlike [`Client::auth_req`] +
+    /// [`Client::send`] it can only use an already-cached OAuth2 token — a
+    /// cancellation must never trigger an interactive login. With no cached
+    /// token, or an expired one, the coordinator rejects the `DELETE` and times
+    /// the query out on its own instead.
+    pub(crate) fn authed_req(&self) -> RequestBuilder {
+        let req = self.client.delete(&self.url);
+        match self.auth.as_ref() {
+            Some(Auth::Basic(u, p)) => req.basic_auth(u, p.as_ref()),
+            Some(Auth::Jwt(t)) => req.bearer_auth(t),
+            Some(Auth::OAuth2(state)) => match state.cached_token() {
+                Some(t) => req.bearer_auth(t),
+                None => req,
+            },
+            _ => req,
+        }
+    }
+
     /// Best-effort `DELETE` of the query. Requires an active Tokio runtime;
     /// silently does nothing if there is none (e.g. drop outside a runtime).
     pub(crate) fn spawn_fire(self) {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
-                let mut req = self.client.delete(&self.url);
-                if let Some(auth) = &self.auth {
-                    req = match auth {
-                        Auth::Basic(u, p) => req.basic_auth(u, p.as_ref()),
-                        Auth::Jwt(t) => req.bearer_auth(t),
-                        // Only ever the cached token: a fire-and-forget cancel must
-                        // not block on an interactive login, so unlike
-                        // `Client::auth_req` this never runs the OAuth2 flow. With no
-                        // cached token — or an expired one — the cancellation is
-                        // simply lost and the coordinator times the query out on its
-                        // own.
-                        Auth::OAuth2(state) => match state.cached_token() {
-                            Some(t) => req.bearer_auth(t),
-                            None => req,
-                        },
-                    };
-                }
-                let _ = req.send().await;
+                let _ = self.authed_req().send().await;
             });
         }
     }
@@ -576,6 +579,7 @@ impl CancelOnDrop {
 /// at drop time.
 pub struct RowStream<'a, T> {
     columns: Vec<Column>,
+    query_id: String,
     cancel: Option<CancelOnDrop>,
     // Entered on every poll so events emitted while streaming (page fetches,
     // segment downloads) carry the query_id — the span from `stream()` itself
@@ -589,6 +593,31 @@ impl<T> RowStream<'_, T> {
     /// resolved before the first row is produced.
     pub fn columns(&self) -> &[Column] {
         &self.columns
+    }
+
+    /// The coordinator's query id, usable with [`Client::cancel`].
+    pub fn query_id(&self) -> &str {
+        &self.query_id
+    }
+
+    /// Cancel the query on the coordinator and report whether it succeeded.
+    ///
+    /// Dropping a `RowStream` cancels best-effort without reporting; use this
+    /// when the outcome matters.
+    pub async fn cancel(mut self) -> Result<()> {
+        // Disarm Drop so it does not fire a second, redundant DELETE.
+        let Some(cancel) = self.cancel.take() else {
+            return Ok(());
+        };
+        let resp = cancel.authed_req().send().await?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(Error::HttpNotOk(
+                resp.status(),
+                "failed to cancel query".to_string(),
+            ))
+        }
     }
 }
 
@@ -658,94 +687,33 @@ impl Client {
         T: Trino + Send + 'static,
         for<'de> T: serde::Deserialize<'de>,
     {
-        let sql = sql.into();
-
-        // Prime the query until the schema is known: follow pages until one
-        // carries `columns` (or the query finishes without any). Errors on these
-        // early pages are surfaced eagerly.
-        let mut res = self.get_retry::<T>(sql).await?;
+        // The pager primes the query until the schema is known and owns the
+        // per-page decoding (Direct and Spooled alike), so this is a thin
+        // flattening of pages into rows.
+        let mut pager = QueryPager::new(self, sql.into()).await?;
         // Span stored on the RowStream and entered on each `poll_next`, so
         // events emitted while streaming carry the query_id. (Entering it here
         // across the priming `.await`s would be the guard-across-await
         // anti-pattern; priming emits little, so it is left unspanned.)
-        let span = tracing::info_span!("query_stream", query_id = %res.id);
-        loop {
-            if let Some(error) = res.error.take() {
-                return Err(error.into());
-            }
-            if res.columns.is_some() || res.data.is_some() {
-                break;
-            }
-            match res.next_uri.clone() {
-                Some(url) => res = self.get_next_retry::<T>(&url).await?,
-                None => break,
-            }
-        }
-
-        let columns = res.columns.clone().unwrap_or_default();
-
-        // Capture what is needed to cancel the query on early drop, without
-        // borrowing `self` (so the cancel can be spawned as a 'static task).
-        let cancel = Some(CancelOnDrop {
-            client: self.client.clone(),
-            url: format!("{}v1/query/{}", self.url, res.id),
-            auth: self.auth.clone(),
-        });
+        let span = tracing::info_span!("query_stream", query_id = %pager.query_id());
+        let columns = pager.columns().to_vec();
+        let query_id = pager.query_id().to_string();
+        // Hand cancellation to the RowStream so the pager's own Drop stays
+        // inert while it lives inside the stream.
+        let cancel = pager.take_cancel();
 
         let inner = async_stream::try_stream! {
-            // `res` already holds the first schema-bearing page (with its data,
-            // if any); keep decoding from there.
-            let mut res = res;
-            // Track raw columns across pages so later spooled pages can be decoded.
-            #[cfg(feature = "spooling")]
-            let mut raw_columns: Option<Vec<Column>> = res.columns.clone();
-
-            loop {
-                if let Some(error) = res.error.take() {
-                    Err(Error::from(error))?;
-                }
-
-                #[cfg(feature = "spooling")]
-                if raw_columns.is_none() {
-                    raw_columns = res.columns.clone();
-                }
-
-                if let Some(data) = res.data.take() {
-                    match data {
-                        QueryResultData::Direct(rows) => {
-                            for row in rows {
-                                yield row;
-                            }
-                        }
-                        #[cfg(feature = "spooling")]
-                        QueryResultData::Spooled(spooled) => {
-                            let cols = raw_columns.clone().or_else(|| res.columns.clone());
-                            let ds = self.fetch_spooled_data::<T>(spooled, cols).await?;
-                            for row in ds.into_vec() {
-                                yield row;
-                            }
-                        }
-                        #[cfg(not(feature = "spooling"))]
-                        QueryResultData::Spooled(_) => {
-                            Err(Error::Protocol(
-                                "Server sent spooled data but 'spooling' feature is not enabled. \
-                                 Add features = [\"spooling\"] to your trino-rust-client dependency in Cargo.toml.".to_string(),
-                            ))?;
-                        }
-                    }
-                }
-
-                match res.next_uri.take() {
-                    Some(url) => {
-                        res = self.get_next_retry::<T>(&url).await?;
-                    }
-                    None => break,
+            let mut pager = pager;
+            while let Some(rows) = pager.next_page().await? {
+                for row in rows {
+                    yield row;
                 }
             }
         };
 
         Ok(RowStream {
             columns,
+            query_id,
             cancel,
             span,
             inner: Box::pin(inner),

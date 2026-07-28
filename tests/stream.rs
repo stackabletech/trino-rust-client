@@ -389,3 +389,38 @@ async fn test_stream_cancels_query_on_early_drop() {
         "dropping an unfinished RowStream should cancel the query"
     );
 }
+
+#[tokio::test]
+async fn stream_exposes_query_id() {
+    let (server, host, port) = make_mock_server().await;
+    mount_paged_result(&server).await;
+    let cli = client(host, port);
+
+    let stream = cli.stream::<Row>("SELECT * FROM t").await.unwrap();
+    assert_eq!(stream.query_id(), "q");
+}
+
+#[tokio::test]
+async fn stream_cancel_issues_delete() {
+    let (server, host, port) = make_mock_server().await;
+    mount_paged_result(&server).await;
+    Mock::given(method("DELETE"))
+        .and(path("/v1/query/q"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+    let cli = client(host, port);
+
+    let mut stream = cli.stream::<Row>("SELECT * FROM t").await.unwrap();
+    let _ = stream.next().await;
+    stream.cancel().await.expect("cancel should succeed");
+
+    let deletes = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.method == wiremock::http::Method::DELETE)
+        .count();
+    assert_eq!(deletes, 1, "cancel must fire exactly one DELETE");
+}
