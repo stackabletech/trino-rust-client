@@ -925,7 +925,7 @@ impl Client {
     }
 
     #[cfg(feature = "spooling")]
-    async fn fetch_spooled_data<T: Trino + 'static>(
+    pub(crate) async fn fetch_spooled_data<T: Trino + 'static>(
         &self,
         spooled: SpooledData,
         columns: Option<Vec<crate::models::Column>>,

@@ -1,7 +1,9 @@
 //! Manual, page-at-a-time iteration over a query's results.
 
 use crate::client::{CancelOnDrop, Client};
-use crate::error::{Error, Result};
+#[cfg(not(feature = "spooling"))]
+use crate::error::Error;
+use crate::error::Result;
 use crate::models::{Column, QueryResult, QueryResultData};
 use crate::Trino;
 
@@ -128,6 +130,18 @@ where
     async fn decode(&self, data: QueryResultData<T>) -> Result<Vec<T>> {
         match data {
             QueryResultData::Direct(rows) => Ok(rows),
+            #[cfg(feature = "spooling")]
+            QueryResultData::Spooled(spooled) => {
+                // Decoding is column-directed, so hand over the cached metadata.
+                let columns = if self.columns.is_empty() {
+                    None
+                } else {
+                    Some(self.columns.clone())
+                };
+                let dataset = self.client.fetch_spooled_data::<T>(spooled, columns).await?;
+                Ok(dataset.into_vec())
+            }
+            #[cfg(not(feature = "spooling"))]
             QueryResultData::Spooled(_) => Err(Error::Protocol(
                 "server sent spooled data but the 'spooling' feature is not enabled. \
                  Add features = [\"spooling\"] to your trino-rust-client dependency \

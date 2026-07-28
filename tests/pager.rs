@@ -133,3 +133,136 @@ async fn pager_cancel_issues_delete() {
         .count();
     assert_eq!(deletes, 1, "cancel must fire exactly one DELETE");
 }
+
+// ---------------------------------------------------------------------------
+// Spooled protocol
+// ---------------------------------------------------------------------------
+
+/// Two pages, each carrying one *remote* segment of 500 rows, served from a
+/// separate "object storage" path. This is the shape that returned 0 rows.
+#[cfg(feature = "spooling")]
+#[tokio::test]
+async fn pager_fetches_remote_segments_across_pages() {
+    let server = MockServer::start().await;
+    let uri = server.uri();
+
+    // Trino's `json` spooling encoding emits positional arrays.
+    let seg = |from: i64| -> Value { Value::Array((from..from + 500).map(|n| json!([n])).collect()) };
+
+    mount(
+        &server,
+        "POST",
+        "",
+        json!({
+            "id": "q", "infoUri": format!("{uri}/ui"),
+            "nextUri": format!("{uri}/v1/statement/q/1"),
+            "columns": columns(),
+            "data": {"encoding": "json", "segments": [
+                {"type": "spooled", "uri": format!("{uri}/segments/0"),
+                 "ackUri": format!("{uri}/ack/0"),
+                 "metadata": {"rowsCount": 500, "segmentSize": 4096}}
+            ]},
+            "stats": stats(), "warnings": []
+        }),
+    )
+    .await;
+
+    // Second page deliberately omits `columns` — the pager must use the cached
+    // metadata from page 1 to decode it.
+    mount(
+        &server,
+        "GET",
+        "/v1/statement/q/1",
+        json!({
+            "id": "q", "infoUri": format!("{uri}/ui"),
+            "data": {"encoding": "json", "segments": [
+                {"type": "spooled", "uri": format!("{uri}/segments/1"),
+                 "metadata": {"rowsCount": 500, "segmentSize": 4096}}
+            ]},
+            "stats": stats(), "warnings": []
+        }),
+    )
+    .await;
+
+    for (i, from) in [(0, 1i64), (1, 501i64)] {
+        Mock::given(method("GET"))
+            .and(path(format!("/segments/{i}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(seg(from)))
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("POST"))
+        .and(path("/ack/0"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let (host, port) = server_addr(&server).await;
+    let cli = ClientBuilder::new("u", host)
+        .port(port)
+        .spooling_encoding(trino_rust_client::spooling::SpoolingEncoding::Json)
+        .build()
+        .unwrap();
+
+    let mut pager = cli.pager::<Row>("SELECT n FROM t").await.unwrap();
+    let mut total = 0usize;
+    while let Some(rows) = pager.next_page().await.unwrap() {
+        total += rows.len();
+    }
+
+    assert_eq!(total, 1000, "every spooled row must be delivered");
+}
+
+/// A query may switch protocols between pages; `get_all` used to reject this.
+#[cfg(feature = "spooling")]
+#[tokio::test]
+async fn pager_handles_direct_and_spooled_in_one_query() {
+    let server = MockServer::start().await;
+    let uri = server.uri();
+
+    mount(
+        &server,
+        "POST",
+        "",
+        json!({
+            "id": "q", "infoUri": format!("{uri}/ui"),
+            "nextUri": format!("{uri}/v1/statement/q/1"),
+            "columns": columns(), "data": [[1],[2]],
+            "stats": stats(), "warnings": []
+        }),
+    )
+    .await;
+    mount(
+        &server,
+        "GET",
+        "/v1/statement/q/1",
+        json!({
+            "id": "q", "infoUri": format!("{uri}/ui"),
+            "columns": columns(),
+            "data": {"encoding": "json", "segments": [
+                {"type": "spooled", "uri": format!("{uri}/segments/0"), "metadata": {}}
+            ]},
+            "stats": stats(), "warnings": []
+        }),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/segments/0"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([[3],[4],[5]])))
+        .mount(&server)
+        .await;
+
+    let (host, port) = server_addr(&server).await;
+    let cli = ClientBuilder::new("u", host)
+        .port(port)
+        .spooling_encoding(trino_rust_client::spooling::SpoolingEncoding::Json)
+        .build()
+        .unwrap();
+
+    let mut pager = cli.pager::<Row>("SELECT n FROM t").await.unwrap();
+    let mut total = 0usize;
+    while let Some(rows) = pager.next_page().await.unwrap() {
+        total += rows.len();
+    }
+    assert_eq!(total, 5);
+}
