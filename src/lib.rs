@@ -56,10 +56,16 @@
 //!
 //! # Cargo features
 //!
-//! - `spooling` — support Trino's spooling protocol for large result sets
-//!   (segments fetched from object storage), enabling
-//!   [`ClientBuilder::spooling_encoding`](client::ClientBuilder::spooling_encoding)
-//!   and related options.
+//! - `spooling` — support for Trino's spooling protocol, where large result sets
+//!   are written to object storage as segments and fetched by the client.
+//!   Enabling the feature does **not** by itself change the wire protocol:
+//!   spooling is requested per client with
+//!   [`ClientBuilder::spooling_encoding`](client::ClientBuilder::spooling_encoding).
+//!   Spooled results are resolved by [`Client::get_all`](client::Client::get_all),
+//!   [`Client::stream`](client::Client::stream) and
+//!   [`Client::pager`](client::Client::pager) — not by
+//!   [`QueryResultData::into_vec`](models::QueryResultData::into_vec), which has
+//!   neither the HTTP client nor the column metadata that decoding requires.
 //!
 //! # Observability
 //!
