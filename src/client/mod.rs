@@ -21,7 +21,7 @@ use crate::models::SpooledData;
 use crate::pager::QueryPager;
 use crate::retry::RetryPolicy;
 use crate::selected_role::SelectedRole;
-use crate::session::Session;
+use crate::session::{Session, SessionSnapshot};
 #[cfg(feature = "spooling")]
 use crate::spooling::decompress_segment_bytes;
 #[cfg(feature = "spooling")]
@@ -592,6 +592,20 @@ impl Client {
             update_type: res.update_type,
             update_count: res.update_count,
         })
+    }
+
+    /// The session state as Trino has most recently reported it.
+    ///
+    /// `USE`, `SET SESSION`, `SET ROLE` and `PREPARE` all change state on the
+    /// coordinator, which reports each change back on the response; the client
+    /// tracks it. This is how to read the result — after `USE postgresql.public`,
+    /// `snapshot.catalog` is `postgresql`, not whatever was configured at build
+    /// time.
+    ///
+    /// The snapshot is taken under one read lock, so its fields are mutually
+    /// consistent.
+    pub async fn session_snapshot(&self) -> SessionSnapshot {
+        self.session.read().await.snapshot()
     }
 
     /// The transaction this client's session is currently bound to.

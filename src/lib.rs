@@ -104,5 +104,6 @@ pub use chrono_tz::Tz;
 pub use client::*;
 pub use models::*;
 pub use pager::QueryPager;
+pub use session::SessionSnapshot;
 pub use trino_rust_client_macros::*;
 pub use types::*;

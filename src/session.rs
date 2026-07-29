@@ -153,3 +153,46 @@ impl SessionBuilder {
         Ok(ret)
     }
 }
+
+/// An owned, point-in-time copy of the session state Trino can change while a
+/// client is in use.
+///
+/// Taken under a single read lock, so the fields are mutually consistent:
+/// `catalog` and `schema` can never come from either side of a concurrent
+/// `USE`. Static configuration — user, source, time zone, client tags — is not
+/// included, because the caller supplied it and it never changes.
+///
+/// Obtained from
+/// [`Client::session_snapshot`](crate::client::Client::session_snapshot).
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct SessionSnapshot {
+    /// The current catalog, after any `X-Trino-Set-Catalog`.
+    pub catalog: Option<String>,
+    /// The current schema, after any `X-Trino-Set-Schema`.
+    pub schema: Option<String>,
+    /// The current SQL path, after any `X-Trino-Set-Path`.
+    pub path: Option<String>,
+    /// Session properties, after `SET`/`RESET SESSION`.
+    pub properties: HashMap<String, String>,
+    /// Selected roles per catalog, after `SET ROLE`.
+    pub roles: HashMap<String, SelectedRole>,
+    /// Statements added by `PREPARE` and not yet deallocated.
+    pub prepared_statements: HashMap<String, String>,
+    /// The transaction the session is bound to.
+    pub transaction_id: TransactionId,
+}
+
+impl Session {
+    pub(crate) fn snapshot(&self) -> SessionSnapshot {
+        SessionSnapshot {
+            catalog: self.catalog.clone(),
+            schema: self.schema.clone(),
+            path: self.path.clone(),
+            properties: self.properties.clone(),
+            roles: self.roles.clone(),
+            prepared_statements: self.prepared_statements.clone(),
+            transaction_id: self.transaction_id.clone(),
+        }
+    }
+}
