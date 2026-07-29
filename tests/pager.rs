@@ -147,7 +147,8 @@ async fn pager_fetches_remote_segments_across_pages() {
     let uri = server.uri();
 
     // Trino's `json` spooling encoding emits positional arrays.
-    let seg = |from: i64| -> Value { Value::Array((from..from + 500).map(|n| json!([n])).collect()) };
+    let seg =
+        |from: i64| -> Value { Value::Array((from..from + 500).map(|n| json!([n])).collect()) };
 
     mount(
         &server,
@@ -248,7 +249,7 @@ async fn pager_handles_direct_and_spooled_in_one_query() {
     .await;
     Mock::given(method("GET"))
         .and(path("/segments/0"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([[3],[4],[5]])))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([[3], [4], [5]])))
         .mount(&server)
         .await;
 
@@ -302,7 +303,7 @@ async fn get_all_accepts_mixed_protocols() {
     .await;
     Mock::given(method("GET"))
         .and(path("/segments/0"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([[3],[4],[5]])))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([[3], [4], [5]])))
         .mount(&server)
         .await;
 
@@ -368,7 +369,7 @@ async fn segment_fetch_retries_transient_failure() {
         .await;
     Mock::given(method("GET"))
         .and(path("/segments/0"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([[1],[2]])))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([[1], [2]])))
         .mount(&server)
         .await;
 

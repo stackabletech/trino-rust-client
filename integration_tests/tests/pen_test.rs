@@ -67,7 +67,9 @@ where
         .catch_unwind()
         .await;
 
-    let _ = client.execute(format!("DROP TABLE IF EXISTS {}", table)).await;
+    let _ = client
+        .execute(format!("DROP TABLE IF EXISTS {}", table))
+        .await;
     if let Err(e) = result {
         std::panic::resume_unwind(e);
     }
@@ -271,7 +273,10 @@ async fn pager_cancel_is_accepted_by_coordinator() {
 
         // Consume one page, then abandon the rest.
         let _ = pager.next_page().await.expect("first page");
-        pager.cancel().await.expect("coordinator must accept cancel");
+        pager
+            .cancel()
+            .await
+            .expect("coordinator must accept cancel");
     })
     .await;
 }
