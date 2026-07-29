@@ -30,9 +30,8 @@ async fn main() {
     let sql = var("SQL").unwrap();
 
     // Default handler: opens the system browser and prints the URL to stderr.
-    // For a custom presentation strategy use
-    // `Auth::new_oauth2_with_handler(Arc::new(my_handler))`, and tune the token
-    // poll loop with `.with_poll(max_attempts, timeout)`.
+    // For a custom presentation strategy, or to change the login budget, use
+    // `Auth::new_oauth2_with_config(OAuth2Config { .. })`.
     let auth = Auth::new_oauth2();
 
     let cli = ClientBuilder::new(user, host)

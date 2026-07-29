@@ -141,9 +141,16 @@ async fn main() {
 }
 ```
 
-Supply a custom presentation strategy (instead of opening a browser) with
-`Auth::new_oauth2_with_handler(Arc::new(my_handler))`, and tune the token poll
-loop with `.with_poll(max_attempts, timeout)`.
+Supply a custom presentation strategy (instead of opening a browser), or change
+the login budget, with `Auth::new_oauth2_with_config`:
+
+```rust
+let auth = Auth::new_oauth2_with_config(OAuth2Config {
+    handler: Arc::new(my_handler),
+    poll_timeout: Duration::from_secs(600),
+    ..Default::default()
+});
+```
 
 ### Example dealing with fields not known at compile time
 ```rust

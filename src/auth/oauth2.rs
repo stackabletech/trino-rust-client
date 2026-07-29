@@ -79,6 +79,30 @@ impl RedirectHandler for BrowserRedirectHandler {
     }
 }
 
+/// How the interactive OAuth2 flow behaves.
+///
+/// Settings are fixed when the [`Auth`](crate::auth::Auth) is built: the token
+/// cache lives behind the same `Arc`, so mutating them afterwards would either
+/// drop a cached token or leave existing `Client` clones on stale settings.
+pub struct OAuth2Config {
+    /// How the login URL is presented to the user.
+    pub handler: Arc<dyn RedirectHandler>,
+    /// The whole budget for one interactive login. Default 300s.
+    pub poll_timeout: Duration,
+    /// Floor between successive token-server polls. Default 1s.
+    pub min_poll_interval: Duration,
+}
+
+impl Default for OAuth2Config {
+    fn default() -> Self {
+        Self {
+            handler: Arc::new(BrowserRedirectHandler),
+            poll_timeout: crate::auth::DEFAULT_POLL_TIMEOUT,
+            min_poll_interval: crate::auth::DEFAULT_MIN_POLL_INTERVAL,
+        }
+    }
+}
+
 /// Shared, interior-mutable state behind `Auth::OAuth2`. Cloning the enclosing
 /// `Arc` shares one token cache across every clone of the `Client`.
 pub struct OAuth2State {

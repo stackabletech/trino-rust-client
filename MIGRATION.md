@@ -189,10 +189,36 @@ let auth = Auth::new_oauth2().with_poll(10, Duration::from_secs(120));
 
 ```rust
 // poll_timeout is the whole budget; min_poll_interval paces the loop
-let auth = Auth::new_oauth2().with_poll(Duration::from_secs(300), Duration::from_secs(1));
+let auth = Auth::new_oauth2_with_config(OAuth2Config {
+    poll_timeout: Duration::from_secs(300),
+    ..Default::default()
+});
 ```
 
 The default budget is now 300s (was an effective ~100s).
+
+### `Auth::with_poll` replaced by `OAuth2Config`
+
+`with_poll` constructed a new `OAuth2State` behind a new `Arc`, so it dropped any
+token already acquired and any `Client` holding the previous `Auth` kept the old
+settings. Poll settings are now fixed when the `Auth` is built.
+
+**Before:**
+
+```rust
+let auth = Auth::new_oauth2_with_handler(Arc::new(my_handler))
+    .with_poll(10, Duration::from_secs(120));
+```
+
+**After:**
+
+```rust
+let auth = Auth::new_oauth2_with_config(OAuth2Config {
+    handler: Arc::new(my_handler),
+    poll_timeout: Duration::from_secs(300),
+    ..Default::default()
+});
+```
 
 ## 0.10.x → 0.11.0
 
