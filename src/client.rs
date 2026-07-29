@@ -584,6 +584,10 @@ pub struct RowStream<'a, T> {
     columns: Vec<Column>,
     query_id: String,
     cancel: Option<CancelOnDrop>,
+    /// Used by `cancel` so an explicit cancellation goes through the same
+    /// authenticated, retried path as `Client::cancel`. `Drop` cannot: it must
+    /// not block on an interactive login, so it keeps using `CancelOnDrop`.
+    client: &'a Client,
     // Entered on every poll so events emitted while streaming (page fetches,
     // segment downloads) carry the query_id — the span from `stream()` itself
     // would otherwise close as soon as the RowStream is handed back.
@@ -606,21 +610,17 @@ impl<T> RowStream<'_, T> {
     /// Cancel the query on the coordinator and report whether it succeeded.
     ///
     /// Dropping a `RowStream` cancels best-effort without reporting; use this
-    /// when the outcome matters.
+    /// when the outcome matters. Unlike `Drop`, this goes through the client's
+    /// normal request path, so it retries under the
+    /// [`RetryPolicy`](crate::retry::RetryPolicy) and re-authenticates if an
+    /// OAuth2 token has expired.
     pub async fn cancel(mut self) -> Result<()> {
         // Disarm Drop so it does not fire a second, redundant DELETE.
-        let Some(cancel) = self.cancel.take() else {
+        if self.cancel.take().is_none() {
+            // Already finished normally — nothing to cancel.
             return Ok(());
-        };
-        let resp = cancel.authed_req().send().await?;
-        if resp.status().is_success() {
-            Ok(())
-        } else {
-            Err(Error::HttpNotOk(
-                resp.status(),
-                "failed to cancel query".to_string(),
-            ))
         }
+        self.client.cancel(&self.query_id).await
     }
 }
 
@@ -718,6 +718,7 @@ impl Client {
             columns,
             query_id,
             cancel,
+            client: self,
             span,
             inner: Box::pin(inner),
         })

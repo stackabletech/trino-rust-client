@@ -424,3 +424,63 @@ async fn stream_cancel_issues_delete() {
         .count();
     assert_eq!(deletes, 1, "cancel must fire exactly one DELETE");
 }
+
+/// `RowStream::cancel` must behave like `QueryPager::cancel`: an expired OAuth2
+/// token is refreshed and the cancel succeeds. It used to build a detached
+/// request that could only use a cached token, so it returned 401 instead.
+#[tokio::test]
+async fn stream_cancel_reauthenticates_on_expired_token() {
+    use std::sync::Arc;
+    use trino_rust_client::auth::{Auth, RedirectHandler};
+    use trino_rust_client::error::Result as TrinoResult;
+
+    struct NoopHandler;
+    impl RedirectHandler for NoopHandler {
+        fn redirect(&self, _url: &str) -> TrinoResult<()> {
+            Ok(())
+        }
+    }
+
+    let (server, host, port) = make_mock_server().await;
+    let uri = server.uri();
+    mount_paged_result(&server).await;
+
+    // The cancel DELETE rejects the stale token once, then accepts the fresh one.
+    Mock::given(method("DELETE"))
+        .and(path("/v1/query/q"))
+        .respond_with(
+            ResponseTemplate::new(401).append_header(
+                "WWW-Authenticate",
+                format!(
+                    r#"Bearer x_redirect_server="{uri}/redirect", x_token_server="{uri}/token""#
+                )
+                .as_str(),
+            ),
+        )
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/v1/query/q"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "token": "fresh-token" })))
+        .mount(&server)
+        .await;
+
+    let client = ClientBuilder::new("user", host)
+        .port(port)
+        .auth(Auth::new_oauth2_with_handler(Arc::new(NoopHandler)))
+        .auth_http_insecure(true)
+        .build()
+        .unwrap();
+
+    let mut rows = client.stream::<Row>("SELECT 1").await.unwrap();
+    let _ = rows.next().await;
+    rows.cancel()
+        .await
+        .expect("cancel must re-authenticate and succeed");
+}
