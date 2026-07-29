@@ -4,7 +4,7 @@ use std::time::Duration;
 use trino_rust_client::auth::{Auth, RedirectHandler};
 use trino_rust_client::client::ClientBuilder;
 use trino_rust_client::error::Result as TrinoResult;
-use trino_rust_client::{Client, Row};
+use trino_rust_client::{Client, Row, TlsVerification};
 
 use wiremock::matchers::{body_string_contains, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -339,7 +339,7 @@ async fn oauth2_real_login() {
     // The bundled local stack uses a self-signed certificate; set
     // TRINO_OAUTH2_NO_VERIFY=1 to skip TLS verification against it.
     if std::env::var("TRINO_OAUTH2_NO_VERIFY").is_ok() {
-        builder = builder.no_verify(true);
+        builder = builder.tls_verification(TlsVerification::None);
     }
     let client = builder.build().unwrap();
     let ds = client

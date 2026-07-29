@@ -2,14 +2,14 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use std::fmt::Display;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RoleType {
     Role,
     All,
     None,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SelectedRole {
     pub ty: RoleType,
     pub role: Option<String>,

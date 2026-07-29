@@ -30,6 +30,23 @@ impl Auth {
     }
 
     /// Interactive OAuth2 using the default browser handler and defaults.
+    ///
+    /// # Token caching
+    ///
+    /// The bearer token lives in the returned `Auth`, not in a global cache.
+    /// Clone one `Auth` across several clients and they share a single login;
+    /// call this a second time and the user is prompted a second time.
+    ///
+    /// ```no_run
+    /// # use trino_rust_client::auth::Auth;
+    /// # use trino_rust_client::ClientBuilder;
+    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// // One login, shared by both clients.
+    /// let auth = Auth::new_oauth2();
+    /// let reads = ClientBuilder::new("u", "trino").secure(true).auth(auth.clone()).build()?;
+    /// let writes = ClientBuilder::new("u", "trino").secure(true).auth(auth).build()?;
+    /// # Ok(()) }
+    /// ```
     pub fn new_oauth2() -> Auth {
         Auth::new_oauth2_with_config(OAuth2Config::default())
     }

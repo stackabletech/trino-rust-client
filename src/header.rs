@@ -5,7 +5,6 @@ pub static HEADER_CATALOG: &str = "X-Trino-Catalog";
 pub static HEADER_SCHEMA: &str = "X-Trino-Schema";
 pub static HEADER_PATH: &str = "X-Trino-Path";
 pub static HEADER_TIME_ZONE: &str = "X-Trino-Time-Zone";
-#[allow(dead_code)]
 pub static HEADER_LANGUAGE: &str = "X-Trino-Language";
 pub static HEADER_TRACE_TOKEN: &str = "X-Trino-Trace-Token";
 pub static HEADER_SESSION: &str = "X-Trino-Session";
@@ -31,3 +30,33 @@ pub static HEADER_ADDED_PREPARE: &str = "X-Trino-Added-Prepare";
 pub static HEADER_DEALLOCATED_PREPARE: &str = "X-Trino-Deallocated-Prepare";
 pub static HEADER_STARTED_TRANSACTION_ID: &str = "X-Trino-Started-Transaction-Id";
 pub static HEADER_CLEAR_TRANSACTION_ID: &str = "X-Trino-Clear-Transaction-Id";
+
+/// Every header this client sets itself.
+///
+/// An extra header may not collide with one of these: `reqwest` appends to the
+/// header map rather than replacing, so a collision would send two values
+/// instead of overriding one.
+pub(crate) static MANAGED_HEADERS: &[&str] = &[
+    HEADER_USER,
+    HEADER_SOURCE,
+    HEADER_CATALOG,
+    HEADER_SCHEMA,
+    HEADER_PATH,
+    HEADER_TIME_ZONE,
+    HEADER_LANGUAGE,
+    HEADER_TRACE_TOKEN,
+    HEADER_SESSION,
+    HEADER_ROLE,
+    HEADER_PREPARED_STATEMENT,
+    HEADER_TRANSACTION,
+    HEADER_CLIENT_INFO,
+    HEADER_CLIENT_TAGS,
+    HEADER_CLIENT_CAPABILITIES,
+    HEADER_RESOURCE_ESTIMATE,
+    HEADER_EXTRA_CREDENTIAL,
+    #[cfg(feature = "spooling")]
+    HEADER_SPOOLING,
+    "authorization",
+    "user-agent",
+    "accept-encoding",
+];
