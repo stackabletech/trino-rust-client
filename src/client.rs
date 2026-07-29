@@ -599,6 +599,15 @@ impl<T> Drop for RowStream<'_, T> {
                     req = match auth {
                         Auth::Basic(u, p) => req.basic_auth(u, p.as_ref()),
                         Auth::Jwt(t) => req.bearer_auth(t),
+                        // Only ever the cached token: a `Drop` must not block on
+                        // an interactive login, so unlike `Client::auth_req` this
+                        // never runs the OAuth2 flow. With no cached token — or an
+                        // expired one — the cancellation is simply lost and the
+                        // coordinator times the query out on its own.
+                        Auth::OAuth2(state) => match state.cached_token() {
+                            Some(t) => req.bearer_auth(t),
+                            None => req,
+                        },
                     };
                 }
                 let _ = req.send().await;
@@ -1172,7 +1181,6 @@ impl Client {
             add_session_header(req, &session)
         };
 
-        let req = self.auth_req(req);
         self.send(req, StatusCode::OK, |resp| async {
             let text = resp.text().await?;
 
@@ -1196,7 +1204,6 @@ impl Client {
             add_prepare_header(req, &session)
         };
 
-        let req = self.auth_req(req);
         self.send(req, StatusCode::OK, |resp| async {
             let text = resp.text().await?;
             let data: QueryResult<T> = serde_json::from_str(&text)
@@ -1216,7 +1223,6 @@ impl Client {
             add_prepare_header(req, &session)
         };
 
-        let req = self.auth_req(req);
         self.send(req, StatusCode::NO_CONTENT, |_| async { Ok(()) })
             .await
     }
@@ -1226,6 +1232,13 @@ impl Client {
             match auth {
                 Auth::Basic(u, p) => req.basic_auth(u, p.as_ref()),
                 Auth::Jwt(t) => req.bearer_auth(t),
+                // Tokens are acquired lazily: with nothing cached the request
+                // goes out unauthenticated, and `send` runs the login flow on
+                // the resulting 401 challenge before retrying once.
+                Auth::OAuth2(state) => match state.cached_token() {
+                    Some(t) => req.bearer_auth(t),
+                    None => req,
+                },
             }
         } else {
             req
@@ -1242,7 +1255,59 @@ impl Client {
         F: FnOnce(Response) -> Fut,
         Fut: std::future::Future<Output = Result<R>>,
     {
-        let resp = req.send().await?;
+        // Capture the token we are about to authenticate with (if any) so the
+        // single-flight refresh can tell whether another task already rotated it.
+        let sent_token = match self.auth.as_ref() {
+            Some(Auth::OAuth2(state)) => state.cached_token(),
+            _ => None,
+        };
+        // Clone the UN-authed builder up front so an OAuth2 401 can be retried
+        // with exactly one fresh token header (`bearer_auth` appends, so auth is
+        // applied only after the clone is taken). Bodies here are `String`s, so
+        // `try_clone` always succeeds.
+        let retry_req = req.try_clone();
+        let resp = self.auth_req(req).send().await?;
+
+        if resp.status() == StatusCode::UNAUTHORIZED {
+            if let (Some(Auth::OAuth2(state)), Some(retry_req)) = (self.auth.as_ref(), retry_req) {
+                // A coordinator with several authentication types configured
+                // (e.g. `http-server.authentication.type=PASSWORD,OAUTH2`) sends
+                // one `WWW-Authenticate` header per type, in configuration
+                // order — so `Basic realm="Trino"` may well precede the Bearer
+                // challenge. Scan all of them for the OAuth2 one.
+                if let Some(challenge) = resp
+                    .headers()
+                    .get_all(reqwest::header::WWW_AUTHENTICATE)
+                    .iter()
+                    .filter_map(|v| v.to_str().ok())
+                    .find_map(crate::auth::parse_www_authenticate)
+                {
+                    self.acquire_oauth2_token(state, &challenge, sent_token)
+                        .await?;
+                    let resp = self.auth_req(retry_req).send().await?;
+                    return self
+                        .finish_send(resp, expected_status, handle_response)
+                        .await;
+                }
+            }
+        }
+
+        self.finish_send(resp, expected_status, handle_response)
+            .await
+    }
+
+    /// Shared response-status handling (extracted so both the first and the
+    /// retried OAuth2 request go through the same path).
+    async fn finish_send<R, F, Fut>(
+        &self,
+        resp: Response,
+        expected_status: StatusCode,
+        handle_response: F,
+    ) -> Result<R>
+    where
+        F: FnOnce(Response) -> Fut,
+        Fut: std::future::Future<Output = Result<R>>,
+    {
         let status = resp.status();
         if status != expected_status {
             let data = resp.text().await.unwrap_or("".to_string());
@@ -1251,6 +1316,26 @@ impl Client {
             self.update_session(&resp).await;
             handle_response(resp).await
         }
+    }
+
+    /// Acquire an OAuth2 token under a single-flight lock: if another task
+    /// already refreshed while we waited, reuse that token instead of opening a
+    /// second browser.
+    async fn acquire_oauth2_token(
+        &self,
+        state: &std::sync::Arc<crate::auth::OAuth2State>,
+        challenge: &crate::auth::Challenge,
+        sent_token: Option<String>,
+    ) -> Result<()> {
+        let _guard = state.acquire.lock().await;
+        // Someone else finished the flow (rotating the token this request was
+        // sent with) while we waited for the lock — reuse it.
+        if state.cached_token() != sent_token {
+            return Ok(());
+        }
+        let token = crate::auth::run_flow(&self.client, state, challenge).await?;
+        *state.token.write().unwrap() = Some(token);
+        Ok(())
     }
 
     async fn update_session(&self, resp: &Response) {
