@@ -1,5 +1,6 @@
 //! `Client::pager` — manual, incremental paging that can resolve spooled data.
 use serde_json::{json, Value};
+use trino_rust_client::error::Error;
 use trino_rust_client::{client::ClientBuilder, Row};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -406,7 +407,11 @@ async fn segment_fetch_does_not_retry_forbidden() {
     let cli = fast_retry_client(host, port);
     let mut pager = cli.pager::<Row>("SELECT n FROM t").await.unwrap();
 
-    assert!(pager.next_page().await.is_err(), "403 must fail the page");
+    let err = pager.next_page().await.expect_err("403 must fail the page");
+    assert!(
+        matches!(&err, Error::HttpNotOk(code, _) if code.as_u16() == 403),
+        "an expired presigned URL must keep its error class, got {err:?}"
+    );
 
     let attempts = server
         .received_requests()

@@ -92,15 +92,16 @@ impl SegmentFetcher {
 
         let results: Vec<Result<Vec<u8>>> = stream::iter(segments.into_iter().enumerate())
             .map(|(idx, segment)| async move {
-                self.fetch_segment(&segment).await.map_err(|e| {
-                    // Add context about which segment failed
-                    let segment_info = match &segment {
-                        Inlined { .. } => format!("inline segment #{}", idx),
-                        Segment::Spooled { uri, .. } => {
-                            format!("remote segment #{} (URI: {})", idx, uri)
-                        }
+                // Keep the error class intact — callers match on
+                // `HttpNotOk`/`HttpError` to tell an expired presigned URL from
+                // a transient outage. The segment index goes to the log rather
+                // than into the error type.
+                self.fetch_segment(&segment).await.inspect_err(|e| {
+                    let uri = match &segment {
+                        Inlined { .. } => "inline".to_string(),
+                        Segment::Spooled { uri, .. } => uri.clone(),
                     };
-                    Error::InternalError(format!("Failed to fetch {}: {}", segment_info, e))
+                    tracing::warn!("Failed to fetch segment #{} ({}): {}", idx, uri, e);
                 })
             })
             .buffered(self.max_concurrent_segments)
