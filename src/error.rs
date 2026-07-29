@@ -1,6 +1,5 @@
 use reqwest::header::HeaderName;
 use reqwest::StatusCode;
-use serde::Deserialize;
 use thiserror::Error;
 
 use crate::models::QueryError;
@@ -77,24 +76,6 @@ impl From<QueryError> for Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
-
-#[derive(Debug, Deserialize)]
-pub struct TrinoRetryResult {
-    pub id: String,
-    #[serde(rename = "infoUri")]
-    pub info_uri: String,
-    pub stats: TrinoStats,
-    pub error: Option<QueryError>,
-    #[serde(rename = "updateType")]
-    pub update_type: Option<String>,
-    #[serde(rename = "updateCount")]
-    pub update_count: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct TrinoStats {
-    pub state: String,
-}
 
 #[cfg(test)]
 mod tests {

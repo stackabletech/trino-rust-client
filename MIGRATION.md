@@ -197,6 +197,32 @@ let auth = Auth::new_oauth2_with_config(OAuth2Config {
 
 The default budget is now 300s (was an effective ~100s).
 
+### `TrinoRetryResult` and `TrinoStats` removed
+
+These modelled the response of a redundant extra request `execute` made after
+draining its pages. That request is gone, and `QueryResult` already carries the
+same information with a richer `stats`.
+
+**Before:**
+
+```rust
+use trino_rust_client::error::TrinoRetryResult;
+
+let result: TrinoRetryResult = /* ... */;
+let count = result.update_count;
+let state = result.stats.state;
+```
+
+**After:**
+
+```rust
+use trino_rust_client::QueryResult;
+
+let result: QueryResult<Row> = client.get_next(&uri).await?;
+let count = result.update_count;
+let state = result.stats.state;
+```
+
 ### `Auth::with_poll` replaced by `OAuth2Config`
 
 `with_poll` constructed a new `OAuth2State` behind a new `Arc`, so it dropped any

@@ -16,7 +16,6 @@ use tracing::*;
 
 use crate::auth::Auth;
 use crate::build_dataset;
-use crate::error::TrinoRetryResult;
 use crate::error::{Error, Result};
 use crate::header::*;
 use crate::models::Column;
@@ -817,42 +816,25 @@ impl Client {
      * */
     #[tracing::instrument(skip_all, fields(query_id = tracing::field::Empty))]
     pub async fn execute(&self, sql: impl Into<String>) -> Result<ExecuteResult> {
-        // try the sql first
-        let res = self.get_retry::<Row>(sql.into()).await?;
+        let mut res = self.get_retry::<Row>(sql.into()).await?;
         tracing::Span::current().record("query_id", res.id.as_str());
 
-        let mut next = res.next_uri;
-        let mut final_uri = next.clone();
-
-        // Trino attempts several times to execute a query before marking it as failed.
-        // At the end, retrieve the URL of the last request to get the result
-        while let Some(url) = &next {
-            let res = self.get_next_retry::<Row>(url).await?;
-
-            let next_uri = res.next_uri;
-
-            // If next_uri is not None, update final_uri
-            if next_uri.is_some() {
-                final_uri = next_uri.clone();
-            }
-            next = next_uri;
+        // Drive the statement to completion, keeping the terminal page: it
+        // already carries updateType/updateCount/error, so there is nothing to
+        // re-fetch afterwards. Re-fetching used to skip auth and the retry
+        // policy, which made one transient failure fatal to the statement.
+        while let Some(url) = res.next_uri.clone() {
+            res = self.get_next_retry::<Row>(&url).await?;
         }
 
-        let url = final_uri.ok_or_else(|| {
-            Error::InternalError("No next URI available for execution result".to_string())
-        })?;
-
-        // Parse the final URI to get TrinoRetryResult
-        let result = self.try_get_retry_result(&url).await?;
-
-        if let Some(error) = result.error {
+        if let Some(error) = res.error {
             return Err(error.into());
         }
 
         Ok(ExecuteResult {
             output_uri: None,
-            update_type: result.update_type,
-            update_count: result.update_count,
+            update_type: res.update_type,
+            update_count: res.update_count,
         })
     }
 
@@ -980,14 +962,6 @@ impl Client {
         }
         self.execute(statement).await?;
         Ok(())
-    }
-
-    async fn try_get_retry_result(&self, url: &str) -> Result<TrinoRetryResult> {
-        let response = self.client.get(url).send().await?;
-
-        let result = response.json::<TrinoRetryResult>().await?;
-
-        Ok(result)
     }
 
     fn retry_policy(&self) -> ExponentialBuilder {
