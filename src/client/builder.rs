@@ -184,6 +184,24 @@ impl ClientBuilder {
         self
     }
 
+    /// Replace the set of extra client capabilities.
+    ///
+    /// These are *added* to the capabilities the client always advertises
+    /// (`PARAMETRIC_DATETIME` and `PATH`), which cannot be removed: the type
+    /// decoder depends on both, and dropping `PARAMETRIC_DATETIME` would change
+    /// what the coordinator sends with no diagnostic.
+    pub fn client_capabilities(mut self, s: HashSet<String>) -> Self {
+        self.session.client_capabilities = s;
+        self
+    }
+
+    /// Advertise one extra client capability. See
+    /// [`client_capabilities`](Self::client_capabilities).
+    pub fn client_capability(mut self, s: impl ToString) -> Self {
+        self.session.client_capabilities.insert(s.to_string());
+        self
+    }
+
     pub fn resource_estimates(mut self, s: HashMap<String, String>) -> Self {
         self.session.resource_estimates = s;
         self

@@ -79,6 +79,21 @@ fn add_prepare_header(mut builder: RequestBuilder, session: &Session) -> Request
     builder
 }
 
+/// Capabilities the client always advertises. Both are load-bearing — the type
+/// decoder relies on `PARAMETRIC_DATETIME` and the session path on `PATH` — so
+/// callers can only add to this set, never replace it.
+const BUILTIN_CLIENT_CAPABILITIES: [&str; 2] = ["PARAMETRIC_DATETIME", "PATH"];
+
+/// The `X-Trino-Client-Capabilities` value: the built-ins unioned with any
+/// configured extras, sorted so the header is deterministic.
+fn client_capabilities_value(session: &Session) -> String {
+    let mut caps: Vec<&str> = BUILTIN_CLIENT_CAPABILITIES.to_vec();
+    caps.extend(session.client_capabilities.iter().map(String::as_str));
+    caps.sort_unstable();
+    caps.dedup();
+    caps.join(",")
+}
+
 fn add_session_header(mut builder: RequestBuilder, session: &Session) -> RequestBuilder {
     builder = add_prepare_header(builder, session);
     builder = builder.header(HEADER_SOURCE, &session.source);
@@ -133,7 +148,10 @@ fn add_session_header(mut builder: RequestBuilder, session: &Session) -> Request
         &session.prepared_statements,
     );
     builder = builder.header(HEADER_TRANSACTION, session.transaction_id.as_header_value());
-    builder = builder.header(HEADER_CLIENT_CAPABILITIES, "PATH,PARAMETRIC_DATETIME");
+    builder = builder.header(
+        HEADER_CLIENT_CAPABILITIES,
+        client_capabilities_value(session),
+    );
 
     // Advertise the spooling protocol only when explicitly opted in.
     #[cfg(feature = "spooling")]
@@ -996,7 +1014,31 @@ mod tests {
     use super::*;
     use crate::client::{decode_kv_from_header, need_retry_fetch, need_retry_submit};
     use crate::error::Error;
+    use crate::session::SessionBuilder;
     use crate::transaction::TransactionId;
+
+    #[test]
+    fn builtin_capabilities_are_always_present_and_sorted() {
+        let session = SessionBuilder::new("u", "h").build().unwrap();
+        assert_eq!(
+            client_capabilities_value(&session),
+            "PARAMETRIC_DATETIME,PATH"
+        );
+    }
+
+    #[test]
+    fn extra_capabilities_merge_with_the_builtins() {
+        let mut b = SessionBuilder::new("u", "h");
+        // A duplicate of a built-in must not be emitted twice.
+        b.client_capabilities.insert("PATH".to_string());
+        b.client_capabilities
+            .insert("SOME_FUTURE_THING".to_string());
+        let session = b.build().unwrap();
+        assert_eq!(
+            client_capabilities_value(&session),
+            "PARAMETRIC_DATETIME,PATH,SOME_FUTURE_THING"
+        );
+    }
 
     #[test]
     fn test_decode_kv_from_header_plus_sign_to_space() {
