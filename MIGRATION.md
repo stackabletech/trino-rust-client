@@ -173,6 +173,27 @@ endpoint, and retries the request with the bearer token once the user
 completes the login. The token is cached in-memory for the life of the
 `Client`.
 
+### OAuth2 polling is bounded by one deadline
+
+`max_poll_attempts` is removed. Two bounds that could silently disagree became
+one: whichever was smaller won, and with Trino's ~10s long-poll it was always the
+attempt count, capping interactive logins at ~100s regardless of `poll_timeout`.
+
+**Before:**
+
+```rust
+let auth = Auth::new_oauth2().with_poll(10, Duration::from_secs(120));
+```
+
+**After:**
+
+```rust
+// poll_timeout is the whole budget; min_poll_interval paces the loop
+let auth = Auth::new_oauth2().with_poll(Duration::from_secs(300), Duration::from_secs(1));
+```
+
+The default budget is now 300s (was an effective ~100s).
+
 ## 0.10.x → 0.11.0
 
 ### Error handling (restructured `Error` enum)

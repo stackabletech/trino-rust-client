@@ -86,22 +86,27 @@ pub struct OAuth2State {
     /// Serializes the browser+poll flow so concurrent 401s open one browser.
     pub(crate) acquire: tokio::sync::Mutex<()>,
     pub(crate) handler: Arc<dyn RedirectHandler>,
-    pub(crate) max_poll_attempts: usize,
+    /// The whole budget for one interactive login.
     pub(crate) poll_timeout: Duration,
+    /// Floor between successive polls. Trino long-polls the token endpoint for
+    /// ~10s, so this normally does nothing; it exists so a coordinator or proxy
+    /// that answers immediately cannot spin the loop and exhaust the budget
+    /// before the user has even seen the browser.
+    pub(crate) min_poll_interval: Duration,
 }
 
 impl OAuth2State {
     pub fn new(
         handler: Arc<dyn RedirectHandler>,
-        max_poll_attempts: usize,
         poll_timeout: Duration,
+        min_poll_interval: Duration,
     ) -> Self {
         Self {
             token: RwLock::new(None),
             acquire: tokio::sync::Mutex::new(()),
             handler,
-            max_poll_attempts,
             poll_timeout,
+            min_poll_interval,
         }
     }
 
@@ -120,7 +125,7 @@ struct TokenResponse {
 }
 
 /// Present the login URL, then poll the token server following `nextUri` until a
-/// token is returned, an error is reported, or attempts/timeout are exhausted.
+/// token is returned, an error is reported, or the budget elapses.
 pub(crate) async fn run_flow(
     client: &reqwest::Client,
     state: &OAuth2State,
@@ -133,19 +138,21 @@ pub(crate) async fn run_flow(
     let deadline = tokio::time::Instant::now() + state.poll_timeout;
     let mut url = challenge.x_token_server.clone();
 
-    for _ in 0..state.max_poll_attempts {
+    loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             break;
         }
+
+        let poll_started = tokio::time::Instant::now();
         let body = match tokio::time::timeout(remaining, async {
             let resp = client.get(&url).send().await?;
             resp.json::<TokenResponse>().await
         })
         .await
         {
-            Ok(result) => result?,  // network/decode error propagates as before
-            Err(_elapsed) => break, // exceeded poll_timeout on this poll
+            Ok(result) => result?,  // network/decode error propagates
+            Err(_elapsed) => break, // the budget ran out mid-poll
         };
 
         if let Some(err) = body.error {
@@ -164,11 +171,23 @@ pub(crate) async fn run_flow(
                 ))
             }
         }
+
+        // Pace the loop. Trino long-polls for ~10s so this is normally a no-op,
+        // but a server that answers instantly would otherwise spin.
+        let spent = poll_started.elapsed();
+        if spent < state.min_poll_interval {
+            let pause = state.min_poll_interval - spent;
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            tokio::time::sleep(pause.min(left)).await;
+        }
     }
 
     Err(Error::OAuth2(format!(
-        "authentication did not complete within {} attempts / {:?}",
-        state.max_poll_attempts, state.poll_timeout
+        "OAuth2 login not completed within {:?}",
+        state.poll_timeout
     )))
 }
 
@@ -225,8 +244,8 @@ mod tests {
     fn state_defaults_have_no_token() {
         let state = OAuth2State::new(
             Arc::new(BrowserRedirectHandler),
-            10,
             Duration::from_secs(120),
+            Duration::from_millis(1),
         );
         assert!(state.cached_token().is_none());
     }
@@ -235,8 +254,8 @@ mod tests {
     fn state_stores_and_reads_token() {
         let state = OAuth2State::new(
             Arc::new(BrowserRedirectHandler),
-            10,
             Duration::from_secs(120),
+            Duration::from_millis(1),
         );
         *state.token.write().unwrap() = Some("tok".to_string());
         assert_eq!(state.cached_token().as_deref(), Some("tok"));
@@ -278,7 +297,11 @@ mod tests {
         let handler = Arc::new(RecordingHandler {
             seen: std::sync::Mutex::new(vec![]),
         });
-        let state = OAuth2State::new(handler.clone(), 10, Duration::from_secs(30));
+        let state = OAuth2State::new(
+            handler.clone(),
+            Duration::from_secs(30),
+            Duration::from_millis(1),
+        );
         let challenge = Challenge {
             x_redirect_server: "https://login.example/redirect".to_string(),
             x_token_server: format!("{}/token/step1", server.uri()),
@@ -311,8 +334,8 @@ mod tests {
 
         let state = OAuth2State::new(
             Arc::new(BrowserRedirectHandler),
-            10,
             Duration::from_secs(30),
+            Duration::from_millis(1),
         );
         let challenge = Challenge {
             x_redirect_server: String::new(),
@@ -346,8 +369,8 @@ mod tests {
 
         let state = OAuth2State::new(
             Arc::new(BrowserRedirectHandler),
-            10,
             Duration::from_millis(150),
+            Duration::from_millis(1),
         );
         let challenge = Challenge {
             x_redirect_server: String::new(),
@@ -358,8 +381,63 @@ mod tests {
             .await
             .unwrap_err();
         match err {
-            crate::error::Error::OAuth2(msg) => assert!(msg.contains("did not complete")),
+            crate::error::Error::OAuth2(msg) => assert!(msg.contains("not completed")),
             other => panic!("expected OAuth2 timeout error, got {other:?}"),
         }
+    }
+
+    /// A coordinator (or proxy) that answers instantly instead of long-polling
+    /// must not burn the whole budget in milliseconds. The floor interval paces
+    /// the loop, so the flow keeps polling until the deadline actually elapses.
+    #[tokio::test]
+    async fn run_flow_paces_polls_when_server_answers_instantly() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let token_url = format!("{}/token/spin", server.uri());
+        // Always pending, answered immediately — the pathological case.
+        Mock::given(method("GET"))
+            .and(path("/token/spin"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "nextUri": token_url.clone()
+            })))
+            .mount(&server)
+            .await;
+
+        let state = OAuth2State::new(
+            Arc::new(BrowserRedirectHandler),
+            Duration::from_millis(600),
+            Duration::from_millis(200),
+        );
+        let challenge = Challenge {
+            x_redirect_server: String::new(),
+            x_token_server: token_url,
+        };
+
+        let started = tokio::time::Instant::now();
+        let err = run_flow(&reqwest::Client::new(), &state, &challenge)
+            .await
+            .unwrap_err();
+        let elapsed = started.elapsed();
+
+        // It must have used the budget, not given up instantly.
+        assert!(
+            elapsed >= Duration::from_millis(500),
+            "gave up after {elapsed:?}, expected to poll until the deadline"
+        );
+        match err {
+            crate::error::Error::OAuth2(msg) => {
+                assert!(msg.contains("600ms"), "message must name the budget: {msg}")
+            }
+            other => panic!("expected OAuth2 timeout error, got {other:?}"),
+        }
+
+        // Paced by min_poll_interval: ~600ms / 200ms, not hundreds of requests.
+        let polls = server.received_requests().await.unwrap().len();
+        assert!(
+            (1..=5).contains(&polls),
+            "expected the floor interval to pace polling, got {polls} requests"
+        );
     }
 }
