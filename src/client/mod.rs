@@ -66,6 +66,10 @@ pub struct ExecuteResult {
 }
 
 fn add_prepare_header(mut builder: RequestBuilder, session: &Session) -> RequestBuilder {
+    // Validated at build time not to collide with any header set below.
+    for (k, v) in &session.extra_headers {
+        builder = builder.header(k, v);
+    }
     // The session user is who the statement runs as. Authentication still uses
     // the connection principal, so the two differing is impersonation, which
     // the coordinator only permits if that principal holds `impersonate`.

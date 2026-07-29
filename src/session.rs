@@ -41,6 +41,9 @@ pub struct Session {
     pub prepared_statements: HashMap<String, String>,
     pub roles: HashMap<String, SelectedRole>,
     pub extra_credentials: HashMap<String, String>,
+    /// Extra headers sent on every request. Validated at build time not to
+    /// collide with any header the client manages.
+    pub extra_headers: HashMap<String, String>,
     pub transaction_id: TransactionId,
     pub client_request_timeout: Duration,
     pub compression_disabled: bool,
@@ -70,6 +73,7 @@ pub(crate) struct SessionBuilder {
     pub(crate) prepared_statements: HashMap<String, String>,
     pub(crate) roles: HashMap<String, SelectedRole>,
     pub(crate) extra_credentials: HashMap<String, String>,
+    pub(crate) extra_headers: HashMap<String, String>,
     pub(crate) transaction_id: TransactionId,
     pub(crate) client_request_timeout: Duration,
     pub(crate) compression_disabled: bool,
@@ -100,6 +104,7 @@ impl SessionBuilder {
             prepared_statements: default(),
             roles: default(),
             extra_credentials: default(),
+            extra_headers: default(),
             transaction_id: TransactionId::NoTransaction,
             client_request_timeout: Duration::from_secs(30),
             compression_disabled: false,
@@ -138,6 +143,7 @@ impl SessionBuilder {
             prepared_statements: self.prepared_statements,
             roles: self.roles,
             extra_credentials: self.extra_credentials,
+            extra_headers: self.extra_headers,
             transaction_id: self.transaction_id,
             client_request_timeout: self.client_request_timeout,
             compression_disabled: self.compression_disabled,

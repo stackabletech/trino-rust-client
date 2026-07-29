@@ -2,11 +2,13 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use chrono_tz::Tz;
+use reqwest::header::{HeaderName, HeaderValue};
 use tokio::sync::RwLock;
 
 use crate::auth::Auth;
 use crate::client::Client;
 use crate::error::{Error, Result};
+use crate::header::MANAGED_HEADERS;
 use crate::retry::RetryPolicy;
 use crate::selected_role::SelectedRole;
 use crate::session::SessionBuilder;
@@ -202,6 +204,26 @@ impl ClientBuilder {
         self
     }
 
+    /// Replace the map of extra headers sent on every request.
+    ///
+    /// Rejected at [`build`](Self::build) time if either name or value is not
+    /// valid HTTP, or if a name collides with one the client manages: any
+    /// `X-Trino-*` header the protocol uses, plus `Authorization`, `User-Agent`
+    /// and `Accept-Encoding`.
+    pub fn extra_headers(mut self, s: HashMap<String, String>) -> Self {
+        self.session.extra_headers = s;
+        self
+    }
+
+    /// Send one extra header on every request. See
+    /// [`extra_headers`](Self::extra_headers).
+    pub fn extra_header(mut self, k: impl ToString, v: impl ToString) -> Self {
+        self.session
+            .extra_headers
+            .insert(k.to_string(), v.to_string());
+        self
+    }
+
     pub fn resource_estimates(mut self, s: HashMap<String, String>) -> Self {
         self.session.resource_estimates = s;
         self
@@ -319,6 +341,7 @@ impl ClientBuilder {
     }
 
     pub fn build(self) -> Result<Client> {
+        validate_extra_headers(&self.session.extra_headers)?;
         let session = self.session.build()?;
         let retry = self.retry.clone();
 
@@ -367,4 +390,20 @@ impl ClientBuilder {
 
         Ok(cli)
     }
+}
+
+/// Reject extra headers that are malformed or collide with a header the client
+/// sets itself, so the failure surfaces at `build` rather than as a duplicated
+/// header on every request.
+fn validate_extra_headers(headers: &HashMap<String, String>) -> Result<()> {
+    for (name, value) in headers {
+        HeaderName::try_from(name.as_str())
+            .map_err(|_| Error::InvalidHeader(format!("`{name}` is not a valid header name")))?;
+        HeaderValue::try_from(value.as_str())
+            .map_err(|_| Error::InvalidHeader(format!("`{name}` has a value that is not valid")))?;
+        if MANAGED_HEADERS.iter().any(|m| m.eq_ignore_ascii_case(name)) {
+            return Err(Error::ReservedHeader(name.clone()));
+        }
+    }
+    Ok(())
 }

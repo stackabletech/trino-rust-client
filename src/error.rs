@@ -51,6 +51,14 @@ pub enum Error {
     ReachMaxAttempt(usize),
     #[error("invalid host: {0}")]
     InvalidHost(String),
+    /// An extra header collides with one the client sets itself — every
+    /// `X-Trino-*` header the protocol uses, plus `Authorization`, `User-Agent`
+    /// and `Accept-Encoding`.
+    #[error("reserved header: {0} is managed by the client")]
+    ReservedHeader(String),
+    /// An extra header's name or value is not valid HTTP.
+    #[error("invalid header: {0}")]
+    InvalidHeader(String),
     /// An unexpected, internal failure that callers are not expected to handle.
     #[error("internal error: {0}")]
     InternalError(String),
