@@ -1068,10 +1068,19 @@ impl Client {
     /// Returns [`Error::Transaction`] if a transaction is already active —
     /// Trino does not support nested transactions.
     ///
-    /// On failure the transaction may nevertheless have been started, since the
-    /// identifier is captured before the statement finishes. Call
-    /// [`rollback`](Self::rollback) to discard it; that also clears an
-    /// identifier the coordinator has already expired.
+    /// Also returns [`Error::Transaction`] if the statement succeeded but no
+    /// usable identifier came back in `X-Trino-Started-Transaction-Id`. A
+    /// healthy coordinator always sends it, so this signals something between
+    /// client and coordinator dropping or rewriting the header. The
+    /// transaction may be open on the coordinator, and because its identifier
+    /// never reached the client it cannot be committed or rolled back — it
+    /// stays open until the coordinator times it out. Surfacing that as an
+    /// error is what lets `Ok(())` mean a transaction is genuinely active.
+    ///
+    /// When the statement itself fails the transaction may nevertheless have
+    /// been started, since the identifier is captured before the statement
+    /// finishes. Call [`rollback`](Self::rollback) to discard it; that also
+    /// clears an identifier the coordinator has already expired.
     pub async fn begin_transaction(&self) -> Result<()> {
         // Bind the guard to a local: holding it across `execute` would deadlock
         // against the write lock `update_session` takes.
@@ -1083,6 +1092,19 @@ impl Client {
             ));
         }
         self.execute("START TRANSACTION").await?;
+
+        // `execute` drains every page and each response passes through
+        // `update_session`, so the identifier has had every chance to arrive by
+        // now. If it still has not, the session is not in a transaction and
+        // reporting success would put every later statement back on `NONE` —
+        // the silent failure this API exists to prevent.
+        if !self.session.read().await.transaction_id.is_active() {
+            return Err(Error::Transaction(
+                "START TRANSACTION succeeded but no usable transaction id was returned in \
+                 X-Trino-Started-Transaction-Id; the session is not in a transaction"
+                    .to_string(),
+            ));
+        }
         Ok(())
     }
 
@@ -1109,6 +1131,16 @@ impl Client {
     ///
     /// Trino answers either with `X-Trino-Clear-Transaction-Id`, which
     /// `update_session` turns back into `TransactionId::NoTransaction`.
+    ///
+    /// Deliberately without the post-condition [`begin_transaction`]
+    /// (Self::begin_transaction) carries. If the clear header never arrives the
+    /// session keeps an identifier the coordinator has already retired, but
+    /// that fails loudly: the next statement sends the dead id and Trino
+    /// rejects it. The `begin_transaction` case is the dangerous one because
+    /// there the session falls back to `NONE`, which Trino happily accepts as
+    /// "no transaction" and executes outside any transaction. Callers that
+    /// need to recover here can reset the session with
+    /// [`set_transaction_id`](Self::set_transaction_id).
     async fn end_transaction(&self, statement: &str) -> Result<()> {
         let active = self.session.read().await.transaction_id.is_active();
         if !active {

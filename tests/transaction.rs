@@ -2,6 +2,7 @@
 //! on subsequent statements.
 
 use trino_rust_client::client::ClientBuilder;
+use trino_rust_client::error::Error;
 use trino_rust_client::transaction::TransactionId;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -128,6 +129,85 @@ async fn transaction_id_is_captured_sent_and_cleared() {
         client.transaction_id().await,
         TransactionId::NoTransaction,
         "X-Trino-Clear-Transaction-Id must reset the session"
+    );
+}
+
+/// Mount a `START TRANSACTION` exchange whose final page carries `header`
+/// (or no started-transaction header at all when `header` is `None`).
+async fn mount_begin(server: &MockServer, header: Option<&str>) {
+    let uri = server.uri();
+
+    Mock::given(method("POST"))
+        .and(path("/v1/statement"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(page(
+            &uri,
+            "q_begin",
+            Some("/v1/statement/q_begin/1"),
+        )))
+        .mount(server)
+        .await;
+
+    let mut final_page = ResponseTemplate::new(200).set_body_string(page(&uri, "q_begin", None));
+    if let Some(value) = header {
+        final_page = final_page.insert_header("X-Trino-Started-Transaction-Id", value);
+    }
+    Mock::given(method("GET"))
+        .and(path("/v1/statement/q_begin/1"))
+        .respond_with(final_page)
+        .mount(server)
+        .await;
+}
+
+/// A coordinator that accepts `START TRANSACTION` but never returns the
+/// identifier (a header-stripping proxy, say) must not leave the caller
+/// believing a transaction is open — otherwise every later statement silently
+/// runs with `NONE`, which is the very failure this API exists to prevent.
+#[tokio::test]
+async fn begin_transaction_fails_when_no_id_is_returned() {
+    let (server, host, port) = make_mock_server().await;
+    mount_begin(&server, None).await;
+
+    let client = ClientBuilder::new("test_user", host)
+        .port(port)
+        .build()
+        .unwrap();
+
+    let err = client
+        .begin_transaction()
+        .await
+        .expect_err("begin_transaction must not report success without a transaction id");
+
+    assert!(
+        matches!(err, Error::Transaction(_)),
+        "expected Error::Transaction, got {err:?}"
+    );
+    assert_eq!(
+        client.transaction_id().await,
+        TransactionId::NoTransaction,
+        "the session must stay out of a transaction"
+    );
+}
+
+/// Same contract when the header arrives but carries the `NONE` sentinel,
+/// which parses back to `TransactionId::NoTransaction`.
+#[tokio::test]
+async fn begin_transaction_fails_when_id_is_the_none_sentinel() {
+    let (server, host, port) = make_mock_server().await;
+    mount_begin(&server, Some("NONE")).await;
+
+    let client = ClientBuilder::new("test_user", host)
+        .port(port)
+        .build()
+        .unwrap();
+
+    let err = client
+        .begin_transaction()
+        .await
+        .expect_err("begin_transaction must not report success on the NONE sentinel");
+
+    assert!(
+        matches!(err, Error::Transaction(_)),
+        "expected Error::Transaction, got {err:?}"
     );
 }
 
