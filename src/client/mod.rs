@@ -35,7 +35,6 @@ pub use builder::ClientBuilder;
 
 // TODO:
 // allow_redirects
-// proxies
 
 /// A configured Trino client.
 ///

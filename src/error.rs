@@ -59,6 +59,9 @@ pub enum Error {
     /// An extra header's name or value is not valid HTTP.
     #[error("invalid header: {0}")]
     InvalidHeader(String),
+    /// A proxy URL is malformed or uses an unsupported scheme.
+    #[error("invalid proxy: {0}")]
+    InvalidProxy(String),
     /// An unexpected, internal failure that callers are not expected to handle.
     #[error("internal error: {0}")]
     InternalError(String),

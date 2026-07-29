@@ -9,6 +9,7 @@ use crate::auth::Auth;
 use crate::client::Client;
 use crate::error::{Error, Result};
 use crate::header::MANAGED_HEADERS;
+use crate::proxy::Proxy;
 use crate::retry::RetryPolicy;
 use crate::selected_role::SelectedRole;
 use crate::session::SessionBuilder;
@@ -39,6 +40,7 @@ pub struct ClientBuilder {
     auth_http_insecure: bool,
     retry: RetryPolicy,
     ssl: Option<Ssl>,
+    proxy: Option<Proxy>,
     no_verify: bool,
     #[cfg(feature = "spooling")]
     segment_fetcher: Option<SegmentFetcher>,
@@ -59,6 +61,7 @@ impl ClientBuilder {
             auth_http_insecure: false,
             retry: RetryPolicy::default(),
             ssl: None,
+            proxy: None,
             no_verify: false,
             #[cfg(feature = "spooling")]
             segment_fetcher: None,
@@ -340,6 +343,21 @@ impl ClientBuilder {
         self
     }
 
+    /// Route every request through an HTTP proxy.
+    ///
+    /// ```no_run
+    /// # use trino_rust_client::{client::ClientBuilder, Proxy};
+    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = ClientBuilder::new("user", "trino.example.com")
+    ///     .proxy(Proxy::all("http://proxy.example.com:3128")?)
+    ///     .build()?;
+    /// # Ok(()) }
+    /// ```
+    pub fn proxy(mut self, p: Proxy) -> Self {
+        self.proxy = Some(p);
+        self
+    }
+
     pub fn build(self) -> Result<Client> {
         validate_extra_headers(&self.session.extra_headers)?;
         let session = self.session.build()?;
@@ -360,6 +378,10 @@ impl ClientBuilder {
             if let Some(root) = &ssl.root_cert {
                 client_builder = client_builder.add_root_certificate(root.0.clone());
             }
+        }
+
+        if let Some(proxy) = &self.proxy {
+            client_builder = client_builder.proxy(proxy.to_reqwest()?);
         }
 
         let client = client_builder.build()?;

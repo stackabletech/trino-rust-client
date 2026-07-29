@@ -86,6 +86,7 @@ pub mod error;
 mod header;
 pub mod models;
 pub mod pager;
+pub mod proxy;
 #[cfg(feature = "spooling")]
 pub mod spooling;
 
@@ -104,6 +105,7 @@ pub use chrono_tz::Tz;
 pub use client::*;
 pub use models::*;
 pub use pager::QueryPager;
+pub use proxy::Proxy;
 pub use session::SessionSnapshot;
 pub use trino_rust_client_macros::*;
 pub use types::*;
