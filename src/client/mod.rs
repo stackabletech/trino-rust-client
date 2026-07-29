@@ -66,8 +66,11 @@ pub struct ExecuteResult {
 }
 
 fn add_prepare_header(mut builder: RequestBuilder, session: &Session) -> RequestBuilder {
-    //FIXME : set trino user from jwt ?
-    builder = builder.header(HEADER_USER, &session.user);
+    // The session user is who the statement runs as. Authentication still uses
+    // the connection principal, so the two differing is impersonation, which
+    // the coordinator only permits if that principal holds `impersonate`.
+    let user = session.session_user.as_ref().unwrap_or(&session.user);
+    builder = builder.header(HEADER_USER, user);
     // TODO: difference with session.source?
     builder = builder.header(USER_AGENT, "trino-rust-client");
     if session.compression_disabled {
@@ -106,7 +109,9 @@ fn add_session_header(mut builder: RequestBuilder, session: &Session) -> Request
     if let Some(v) = &session.timezone {
         builder = builder.header(HEADER_TIME_ZONE, v.to_string())
     }
-    // TODO: add locale
+    if let Some(v) = &session.locale {
+        builder = builder.header(HEADER_LANGUAGE, v);
+    }
     builder = add_header_map(builder, HEADER_SESSION, &session.properties);
     builder = add_header_map(
         builder,

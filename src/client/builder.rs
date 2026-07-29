@@ -164,6 +164,26 @@ impl ClientBuilder {
         self
     }
 
+    /// Run statements as `u` while authenticating as the user given to
+    /// [`ClientBuilder::new`] — impersonation, sent as `X-Trino-User`.
+    ///
+    /// The coordinator only allows this if the authenticating principal holds
+    /// the `impersonate` permission for the target user.
+    ///
+    /// Builder-time only, deliberately: session state (properties, roles,
+    /// prepared statements) accumulates on a client, so one client per
+    /// impersonated user keeps that state from leaking across identities.
+    pub fn session_user(mut self, u: impl ToString) -> Self {
+        self.session.session_user = Some(u.to_string());
+        self
+    }
+
+    /// Set the locale sent as `X-Trino-Language`, e.g. `"de-DE"`.
+    pub fn locale(mut self, l: impl ToString) -> Self {
+        self.session.locale = Some(l.to_string());
+        self
+    }
+
     pub fn resource_estimates(mut self, s: HashMap<String, String>) -> Self {
         self.session.resource_estimates = s;
         self

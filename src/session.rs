@@ -20,6 +20,9 @@ fn default<T: Default>() -> T {
 pub struct Session {
     pub url: Url,
     pub user: String,
+    /// When set, the user statements run as (`X-Trino-User`), leaving `user`
+    /// as the authenticating principal.
+    pub session_user: Option<String>,
     pub source: String,
     pub trace_token: Option<String>,
     pub client_tags: HashSet<String>,
@@ -29,7 +32,8 @@ pub struct Session {
     pub path: Option<String>,
     // TODO: set system timezone as default value
     pub timezone: Option<Tz>,
-    // TODO: add locale
+    /// Sent as `X-Trino-Language`.
+    pub locale: Option<String>,
     pub resource_estimates: HashMap<String, String>,
     pub properties: HashMap<String, String>,
     pub prepared_statements: HashMap<String, String>,
@@ -48,6 +52,7 @@ pub(crate) struct SessionBuilder {
     pub(crate) port: u16,
     pub(crate) secure: bool,
     pub(crate) user: String,
+    pub(crate) session_user: Option<String>,
     pub(crate) source: String,
     pub(crate) trace_token: Option<String>,
     pub(crate) client_tags: HashSet<String>,
@@ -56,7 +61,7 @@ pub(crate) struct SessionBuilder {
     pub(crate) schema: Option<String>,
     pub(crate) path: Option<String>,
     pub(crate) timezone: Option<Tz>,
-    // TODO: add locale
+    pub(crate) locale: Option<String>,
     pub(crate) resource_estimates: HashMap<String, String>,
     pub(crate) properties: HashMap<String, String>,
     pub(crate) prepared_statements: HashMap<String, String>,
@@ -76,6 +81,7 @@ impl SessionBuilder {
             port: 80,
             secure: false,
             user: user.to_string(),
+            session_user: None,
             source: "trino-rust-client".to_string(),
             trace_token: None,
             client_tags: default(),
@@ -84,6 +90,7 @@ impl SessionBuilder {
             schema: None,
             path: None,
             timezone: None,
+            locale: None,
             resource_estimates: default(),
             properties: default(),
             prepared_statements: default(),
@@ -111,6 +118,7 @@ impl SessionBuilder {
         let ret = Session {
             url,
             user: self.user,
+            session_user: self.session_user,
             source: self.source,
             trace_token: self.trace_token,
             client_tags: self.client_tags,
@@ -119,6 +127,7 @@ impl SessionBuilder {
             schema: self.schema,
             path: self.path,
             timezone: self.timezone,
+            locale: self.locale,
             resource_estimates: self.resource_estimates,
             properties: self.properties,
             prepared_statements: self.prepared_statements,

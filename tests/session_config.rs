@@ -96,3 +96,69 @@ async fn role_is_sent_per_catalog() {
         "hive=ROLE%7Badmin%7D"
     );
 }
+
+#[tokio::test]
+async fn session_user_overrides_the_trino_user_header() {
+    let (server, host, port) = mock_single_page().await;
+    let cli = ClientBuilder::new("service-principal", host)
+        .port(port)
+        .session_user("alice")
+        .build()
+        .unwrap();
+    cli.get_all::<Row>("SELECT 1").await.unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(
+        reqs[0]
+            .headers
+            .get("x-trino-user")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "alice",
+        "the statement must run as the impersonated user"
+    );
+}
+
+#[tokio::test]
+async fn trino_user_defaults_to_the_connection_user() {
+    let (server, host, port) = mock_single_page().await;
+    let cli = ClientBuilder::new("service-principal", host)
+        .port(port)
+        .build()
+        .unwrap();
+    cli.get_all::<Row>("SELECT 1").await.unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(
+        reqs[0]
+            .headers
+            .get("x-trino-user")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "service-principal"
+    );
+}
+
+#[tokio::test]
+async fn locale_is_sent() {
+    let (server, host, port) = mock_single_page().await;
+    let cli = ClientBuilder::new("u", host)
+        .port(port)
+        .locale("de-DE")
+        .build()
+        .unwrap();
+    cli.get_all::<Row>("SELECT 1").await.unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(
+        reqs[0]
+            .headers
+            .get("x-trino-language")
+            .expect("X-Trino-Language must be sent when a locale is configured")
+            .to_str()
+            .unwrap(),
+        "de-DE"
+    );
+}

@@ -5,7 +5,6 @@ pub static HEADER_CATALOG: &str = "X-Trino-Catalog";
 pub static HEADER_SCHEMA: &str = "X-Trino-Schema";
 pub static HEADER_PATH: &str = "X-Trino-Path";
 pub static HEADER_TIME_ZONE: &str = "X-Trino-Time-Zone";
-#[allow(dead_code)]
 pub static HEADER_LANGUAGE: &str = "X-Trino-Language";
 pub static HEADER_TRACE_TOKEN: &str = "X-Trino-Trace-Token";
 pub static HEADER_SESSION: &str = "X-Trino-Session";
