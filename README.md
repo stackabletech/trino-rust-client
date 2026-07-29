@@ -117,8 +117,10 @@ async fn main() {
 Trino's OAuth2 authentication makes the **coordinator** the OAuth client: on a
 `401` the client opens the coordinator-supplied login URL in a browser (and
 prints it to stderr as a fallback), polls Trino's token endpoint until you finish
-the IdP login, then retries with the bearer token. The token is cached in memory
-for the life of the `Client`. Requires TLS to the coordinator.
+the IdP login, then retries with the bearer token. The token is cached in the
+`Auth` value: build one `Auth` and clone it to share a single login across
+clients — each fresh `Auth::new_oauth2()` prompts again. Requires TLS to the
+coordinator.
 
 ```rust
 use trino_rust_client::auth::Auth;

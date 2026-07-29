@@ -170,8 +170,9 @@ On a `401` Bearer challenge the client presents the login URL (opens a
 browser and prints it to stderr by default; supply a custom `RedirectHandler`
 via `Auth::new_oauth2_with_handler` to change that), polls the Trino token
 endpoint, and retries the request with the bearer token once the user
-completes the login. The token is cached in-memory for the life of the
-`Client`.
+completes the login. The token is cached in the `Auth` value, not globally:
+clients built from clones of one `Auth` share a single login, while a second
+`Auth::new_oauth2()` triggers a second one.
 
 ### OAuth2 polling is bounded by one deadline
 

@@ -13,6 +13,34 @@ use flate2::read::GzDecoder;
 use futures::stream::{self, StreamExt};
 use reqwest::Client;
 
+/// Strip the query string from a segment URI before it reaches a log line or an
+/// error message.
+///
+/// Spooled segment URIs are presigned: the query carries `X-Amz-Signature` (or
+/// the equivalent for another object store), which is a bearer credential for
+/// that object until it expires. Anyone who can read the log can fetch the
+/// segment. The path alone still identifies which segment failed.
+fn redact_uri(uri: &str) -> String {
+    match uri.split_once('?') {
+        Some((base, _)) => format!("{base}?<redacted>"),
+        None => uri.to_string(),
+    }
+}
+
+/// `reqwest` embeds the request URL in its `Display`, so a failed segment fetch
+/// would print the presigned query string. Swap it for the redacted form —
+/// dropping the URL entirely if it will not parse — while keeping the error
+/// class intact, which the retry predicate depends on.
+fn redact_reqwest_url(e: reqwest::Error) -> Error {
+    match e.url().cloned() {
+        Some(mut url) => {
+            url.set_query(Some("redacted"));
+            Error::from(e.with_url(url))
+        }
+        None => Error::from(e),
+    }
+}
+
 // Default maximum number of concurrent segment fetches based on CPU count
 fn default_max_concurrent_segments() -> usize {
     thread::available_parallelism()
@@ -72,7 +100,7 @@ impl SegmentFetcher {
                 // Acknowledgement is best-effort and deliberately not retried.
                 if let Some(ack) = ack_uri {
                     if let Err(e) = self.acknowledge_segment(ack, headers.as_ref()).await {
-                        tracing::warn!("Failed to acknowledge segment {}: {}", ack, e);
+                        tracing::warn!("Failed to acknowledge segment {}: {}", redact_uri(ack), e);
                     }
                 }
 
@@ -101,7 +129,12 @@ impl SegmentFetcher {
                         Inlined { .. } => "inline".to_string(),
                         Segment::Spooled { uri, .. } => uri.clone(),
                     };
-                    tracing::warn!("Failed to fetch segment #{} ({}): {}", idx, uri, e);
+                    tracing::warn!(
+                        "Failed to fetch segment #{} ({}): {}",
+                        idx,
+                        redact_uri(&uri),
+                        e
+                    );
                 })
             })
             .buffered(self.max_concurrent_segments)
@@ -126,7 +159,7 @@ impl SegmentFetcher {
         uri: &str,
         headers: Option<&HashMap<String, Vec<String>>>,
     ) -> Result<Vec<u8>> {
-        tracing::debug!("Fetching spooled segment from: {}", uri);
+        tracing::debug!("Fetching spooled segment from: {}", redact_uri(uri));
 
         // Build GET request with optional headers
         let mut request = self.http_client.get(uri);
@@ -147,13 +180,13 @@ impl SegmentFetcher {
         // Keep the reqwest error class intact: the retry predicate matches on
         // `Error::HttpError` / `Error::HttpNotOk`, so wrapping this in a
         // stringly `InternalError` would silently make every failure terminal.
-        let response = request.send().await.map_err(Error::from)?;
+        let response = request.send().await.map_err(redact_reqwest_url)?;
 
         // Check status
         if !response.status().is_success() {
             return Err(Error::HttpNotOk(
                 response.status(),
-                format!("Failed to fetch segment from {}", uri),
+                format!("Failed to fetch segment from {}", redact_uri(uri)),
             ));
         }
 
@@ -168,7 +201,7 @@ impl SegmentFetcher {
         tracing::debug!(
             "Remote segment Content-Encoding: {} from {}",
             content_encoding,
-            uri
+            redact_uri(uri)
         );
 
         // Get response body
@@ -208,7 +241,7 @@ impl SegmentFetcher {
         ack_uri: &str,
         headers: Option<&HashMap<String, Vec<String>>>,
     ) -> Result<()> {
-        tracing::debug!("Acknowledging segment: {}", ack_uri);
+        tracing::debug!("Acknowledging segment: {}", redact_uri(ack_uri));
 
         let mut request = self.http_client.post(ack_uri);
 
@@ -224,7 +257,8 @@ impl SegmentFetcher {
         let response = request.send().await.map_err(|e| {
             Error::InternalError(format!(
                 "Failed to send acknowledgment to {}: {}",
-                ack_uri, e
+                redact_uri(ack_uri),
+                redact_reqwest_url(e)
             ))
         })?;
 
@@ -232,7 +266,7 @@ impl SegmentFetcher {
             tracing::warn!(
                 "Acknowledgment returned non-success status: {} for {}",
                 response.status(),
-                ack_uri
+                redact_uri(ack_uri)
             );
         }
 
@@ -250,4 +284,60 @@ fn decompress_gzip(compressed_data: &[u8]) -> Result<Vec<u8>> {
         .map_err(|e| Error::Decode(format!("Failed to decompress gzip data: {}", e)))?;
 
     Ok(decompressed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A presigned segment URL is a bearer credential for that object. It must
+    /// never reach a log line or an error message intact.
+    #[test]
+    fn redact_uri_removes_the_presigned_query() {
+        let signed = "http://minio:9003/spooling/segments/01KYRV.json%2Bzstd\
+                      ?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=minioadmin\
+                      &X-Amz-Signature=dec77808af5572babba07ca1d41b0858554897018be9d16ed53ad792072c87bb";
+        let redacted = redact_uri(signed);
+        assert_eq!(
+            redacted,
+            "http://minio:9003/spooling/segments/01KYRV.json%2Bzstd?<redacted>"
+        );
+        assert!(!redacted.contains("X-Amz-Signature"));
+        assert!(!redacted.contains("dec77808"));
+    }
+
+    #[test]
+    fn redact_uri_leaves_an_unsigned_uri_alone() {
+        let plain = "http://storage.example.com/segments/abc.json";
+        assert_eq!(redact_uri(plain), plain);
+    }
+
+    #[tokio::test]
+    async fn a_failed_fetch_does_not_print_the_signature() {
+        // 192.0.2.0/24 is TEST-NET-1, so this connect cannot succeed.
+        let client = Client::builder()
+            .connect_timeout(std::time::Duration::from_millis(200))
+            .build()
+            .unwrap();
+        let fetcher = SegmentFetcher::new(client);
+        let uri = "http://192.0.2.1:9003/spooling/segments/x.json\
+                   ?X-Amz-Signature=SUPERSECRETSIGNATURE&X-Amz-Credential=minioadmin";
+
+        let err = fetcher
+            .fetch_spooled_segment(uri, None)
+            .await
+            .expect_err("connecting to TEST-NET-1 must fail");
+        let rendered = format!("{err}");
+        assert!(
+            !rendered.contains("SUPERSECRETSIGNATURE"),
+            "the presigned signature leaked into the error: {rendered}"
+        );
+        // The error class must survive redaction — `need_retry_fetch` matches
+        // on it, so turning this into a stringly error would make every
+        // transient segment failure terminal.
+        assert!(
+            matches!(err, Error::HttpError(_)),
+            "expected Error::HttpError, got {err:?}"
+        );
+    }
 }
