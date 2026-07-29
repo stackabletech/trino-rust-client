@@ -40,7 +40,7 @@ async fn main() {
         .auth(auth)
         .secure(true) // OAuth2 requires HTTPS to the coordinator
         // For a self-signed coordinator certificate, also supply its root cert:
-        //   .ssl(Ssl { root_cert: Some(Ssl::read_pem(&"/path/root.pem").unwrap()) })
+        //   .ssl(Ssl::new().root_cert(Ssl::read_pem(&"/path/root.pem").unwrap()))
         .build()
         .unwrap();
 

@@ -107,5 +107,6 @@ pub use models::*;
 pub use pager::QueryPager;
 pub use proxy::Proxy;
 pub use session::SessionSnapshot;
+pub use ssl::{Identity, TlsVerification};
 pub use trino_rust_client_macros::*;
 pub use types::*;

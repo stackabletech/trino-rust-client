@@ -22,9 +22,7 @@ async fn main() {
         .catalog(catalog)
         .auth(auth)
         .secure(true)
-        .ssl(Ssl {
-            root_cert: Some(Ssl::read_pem(&"/path/root.pem").unwrap()),
-        })
+        .ssl(Ssl::new().root_cert(Ssl::read_pem(&"/path/root.pem").unwrap()))
         .build()
         .unwrap();
 

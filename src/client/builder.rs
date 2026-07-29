@@ -15,7 +15,7 @@ use crate::selected_role::SelectedRole;
 use crate::session::SessionBuilder;
 #[cfg(feature = "spooling")]
 use crate::spooling::{SegmentFetcher, SpoolingEncoding};
-use crate::ssl::Ssl;
+use crate::ssl::{Ssl, TlsVerification};
 use crate::transaction::TransactionId;
 
 /// Builder for a [`Client`].
@@ -41,7 +41,7 @@ pub struct ClientBuilder {
     retry: RetryPolicy,
     ssl: Option<Ssl>,
     proxy: Option<Proxy>,
-    no_verify: bool,
+    tls_verification: TlsVerification,
     #[cfg(feature = "spooling")]
     segment_fetcher: Option<SegmentFetcher>,
     #[cfg(feature = "spooling")]
@@ -62,7 +62,7 @@ impl ClientBuilder {
             retry: RetryPolicy::default(),
             ssl: None,
             proxy: None,
-            no_verify: false,
+            tls_verification: TlsVerification::default(),
             #[cfg(feature = "spooling")]
             segment_fetcher: None,
             #[cfg(feature = "spooling")]
@@ -80,8 +80,22 @@ impl ClientBuilder {
         self
     }
 
-    pub fn no_verify(mut self, nv: bool) -> Self {
-        self.no_verify = nv;
+    /// How strictly to verify the coordinator's TLS certificate.
+    ///
+    /// Defaults to [`TlsVerification::Full`].
+    ///
+    /// ```no_run
+    /// # use trino_rust_client::{client::ClientBuilder, TlsVerification};
+    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = ClientBuilder::new("user", "trino.internal")
+    ///     .secure(true)
+    ///     // The certificate is issued for a name we don't reach it on.
+    ///     .tls_verification(TlsVerification::CaOnly)
+    ///     .build()?;
+    /// # Ok(()) }
+    /// ```
+    pub fn tls_verification(mut self, v: TlsVerification) -> Self {
+        self.tls_verification = v;
         self
     }
 
@@ -370,14 +384,34 @@ impl ClientBuilder {
         let mut client_builder =
             reqwest::ClientBuilder::new().timeout(session.client_request_timeout);
 
-        if self.no_verify {
-            client_builder = client_builder.danger_accept_invalid_certs(true);
-        }
-
-        if let Some(ssl) = &self.ssl {
-            if let Some(root) = &ssl.root_cert {
+        // `CaOnly` is the awkward one: under rustls, reqwest refuses to skip
+        // hostname verification unless the trust store was supplied through
+        // `tls_certs_only`, and that call replaces the native roots outright.
+        // The mode therefore requires an explicitly configured root certificate.
+        let root_cert = self.ssl.as_ref().and_then(|s| s.root_cert.as_ref());
+        if self.tls_verification == TlsVerification::CaOnly {
+            let root = root_cert.ok_or_else(|| {
+                Error::Tls(
+                    "TlsVerification::CaOnly requires a root certificate: skipping hostname \
+                     verification under rustls replaces the trust store, so the platform's \
+                     roots are not available. Supply one with Ssl::root_cert."
+                        .to_string(),
+                )
+            })?;
+            client_builder = client_builder
+                .tls_certs_only([root.0.clone()])
+                .tls_danger_accept_invalid_hostnames(true);
+        } else {
+            if self.tls_verification == TlsVerification::None {
+                client_builder = client_builder.tls_danger_accept_invalid_certs(true);
+            }
+            if let Some(root) = root_cert {
                 client_builder = client_builder.add_root_certificate(root.0.clone());
             }
+        }
+
+        if let Some(identity) = self.ssl.as_ref().and_then(|s| s.identity.as_ref()) {
+            client_builder = client_builder.identity(identity.0.clone());
         }
 
         if let Some(proxy) = &self.proxy {
