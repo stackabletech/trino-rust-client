@@ -1,12 +1,14 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
+use chrono_tz::Tz;
 use tokio::sync::RwLock;
 
 use crate::auth::Auth;
 use crate::client::Client;
 use crate::error::{Error, Result};
 use crate::retry::RetryPolicy;
+use crate::selected_role::SelectedRole;
 use crate::session::SessionBuilder;
 #[cfg(feature = "spooling")]
 use crate::spooling::{SegmentFetcher, SpoolingEncoding};
@@ -115,6 +117,50 @@ impl ClientBuilder {
 
     pub fn path(mut self, s: impl ToString) -> Self {
         self.session.path = Some(s.to_string());
+        self
+    }
+
+    /// Set the session time zone, sent as `X-Trino-Time-Zone`.
+    ///
+    /// Without this the coordinator's own default applies, which determines how
+    /// `timestamp with time zone` values are rendered.
+    ///
+    /// ```no_run
+    /// # use trino_rust_client::{client::ClientBuilder, Tz};
+    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = ClientBuilder::new("user", "localhost")
+    ///     .timezone("Europe/Berlin".parse::<Tz>()?)
+    ///     .build()?;
+    /// # Ok(()) }
+    /// ```
+    pub fn timezone(mut self, tz: Tz) -> Self {
+        self.session.timezone = Some(tz);
+        self
+    }
+
+    /// Replace the whole per-catalog role map, sent as `X-Trino-Role`.
+    pub fn roles(mut self, s: HashMap<String, SelectedRole>) -> Self {
+        self.session.roles = s;
+        self
+    }
+
+    /// Select a role for one catalog, sent as `X-Trino-Role`.
+    ///
+    /// `catalog` is a catalog name, or the special key `"system"` for the system
+    /// role. Hive and Iceberg under `sql-standard` security need this; it is also
+    /// the only configuration in which `SQLTablePrivileges` returns a row.
+    ///
+    /// ```no_run
+    /// # use trino_rust_client::client::ClientBuilder;
+    /// # use trino_rust_client::selected_role::{RoleType, SelectedRole};
+    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = ClientBuilder::new("user", "localhost")
+    ///     .role("hive", SelectedRole::new(RoleType::Role, Some("admin".into())))
+    ///     .build()?;
+    /// # Ok(()) }
+    /// ```
+    pub fn role(mut self, catalog: impl ToString, role: SelectedRole) -> Self {
+        self.session.roles.insert(catalog.to_string(), role);
         self
     }
 
