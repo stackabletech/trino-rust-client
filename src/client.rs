@@ -611,9 +611,8 @@ impl<T> RowStream<'_, T> {
     ///
     /// Dropping a `RowStream` cancels best-effort without reporting; use this
     /// when the outcome matters. Unlike `Drop`, this goes through the client's
-    /// normal request path, so it retries under the
-    /// [`RetryPolicy`](crate::retry::RetryPolicy) and re-authenticates if an
-    /// OAuth2 token has expired.
+    /// normal request path, so it retries under the [`RetryPolicy`] and
+    /// re-authenticates if an OAuth2 token has expired.
     pub async fn cancel(mut self) -> Result<()> {
         // Disarm Drop so it does not fire a second, redundant DELETE.
         if self.cancel.take().is_none() {
@@ -660,8 +659,9 @@ impl Client {
     /// sets.
     ///
     /// Both the Direct and (with the `spooling` feature) Spooled protocols are
-    /// supported. With spooling, rows are still materialized one segment at a
-    /// time rather than for the entire query, keeping peak memory bounded.
+    /// supported. With spooling, each page's segments are fetched concurrently
+    /// and decoded together, so peak memory is bounded by the largest page
+    /// rather than by the whole result set.
     ///
     /// Unlike [`Client::get_all`], this does not reject a query that mixes the
     /// Direct and Spooled protocols across pages; each page is decoded according

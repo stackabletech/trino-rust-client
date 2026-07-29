@@ -44,7 +44,7 @@ transient failure, query submission (POST) only when definitely not processed.
 ### Data protocols (`QueryResultData<T>`)
 - **Direct**: inline JSON rows.
 - **Spooled** (`feature = "spooling"`): compressed segments fetched from object
-  storage; decoded one segment at a time.
+  storage; a page's segments are fetched concurrently and decoded together.
 
 ### Type system (`src/types/`)
 - The `Trino` trait maps a Rust type to a `TrinoTy` and provides a
