@@ -47,6 +47,14 @@
 //! - [`Row`] — a dynamically-typed row when the schema is not known at compile
 //!   time; pair it with [`DataSet`] to keep the column metadata.
 //!
+//! # Session state
+//!
+//! `USE`, `SET SESSION` and `SET ROLE` change state on the coordinator, which
+//! reports each change back on the response. The client tracks it; read the
+//! result with [`Client::session_snapshot`](client::Client::session_snapshot) —
+//! after `USE postgresql.public` that is where the current catalog and schema
+//! live, not in whatever was configured on the builder.
+//!
 //! # Error handling
 //!
 //! All fallible calls return [`error::Error`]. A query failure from the

@@ -246,6 +246,81 @@ let auth = Auth::new_oauth2_with_config(OAuth2Config {
 });
 ```
 
+### TLS verification is a three-state enum
+
+`no_verify(bool)` could only express "verify everything" or "verify nothing".
+`TlsVerification::CaOnly` adds JDBC's `SSLVerification=CA` — check the
+certificate chain, skip the hostname — for coordinators reached under a name
+their certificate does not carry.
+
+**Before:**
+
+```rust
+let client = ClientBuilder::new("user", "trino.example.com")
+    .secure(true)
+    .no_verify(true)
+    .build()?;
+```
+
+**After:**
+
+```rust
+use trino_rust_client::TlsVerification;
+
+let client = ClientBuilder::new("user", "trino.example.com")
+    .secure(true)
+    .tls_verification(TlsVerification::None)
+    .build()?;
+```
+
+`no_verify(false)` was the default and has no replacement — drop the call, or
+write `.tls_verification(TlsVerification::Full)` to say so explicitly.
+
+`CaOnly` additionally **requires** a root certificate. rustls only permits
+skipping hostname verification when the trust store is supplied explicitly, and
+supplying it excludes the platform's own roots, so without one the client would
+trust nothing at all. `build` returns `Error::Tls` saying so:
+
+```rust
+let client = ClientBuilder::new("user", "trino.internal")
+    .secure(true)
+    .ssl(Ssl::new().root_cert(Ssl::read_pem(&"/path/root.pem")?))
+    .tls_verification(TlsVerification::CaOnly)
+    .build()?;
+```
+
+### `Ssl` is built, not constructed literally
+
+`Ssl` gained a client-certificate identity, so its fields are private and set
+through builder methods.
+
+**Before:**
+
+```rust
+.ssl(Ssl {
+    root_cert: Some(Ssl::read_pem(&"/path/root.pem")?),
+})
+```
+
+**After:**
+
+```rust
+.ssl(Ssl::new().root_cert(Ssl::read_pem(&"/path/root.pem")?))
+```
+
+To present a client certificate as well:
+
+```rust
+use trino_rust_client::ssl::Identity;
+
+.ssl(Ssl::new()
+    .root_cert(Ssl::read_pem(&"/path/root.pem")?)
+    .identity(Identity::read_pem(&"/path/client.pem")?))
+```
+
+The identity PEM must hold the certificate chain followed by a PKCS#8 private
+key. PKCS#12 and JKS are not supported — the crate builds `reqwest` on rustls.
+
 ## 0.10.x → 0.11.0
 
 ### Error handling (restructured `Error` enum)
