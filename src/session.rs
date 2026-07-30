@@ -19,8 +19,15 @@ fn default<T: Default>() -> T {
 #[derive(Debug)]
 pub struct Session {
     pub url: Url,
-    pub user: String,
-    /// When set, the user statements run as (`X-Trino-User`), leaving `user`
+    /// The Trino user, sent as `X-Trino-User`.
+    ///
+    /// `None` leaves the header off, which is only meaningful when the request
+    /// authenticates: Trino then takes the user from the authenticated
+    /// identity. Interactive OAuth 2.0 is the case that needs it — the identity
+    /// provider decides who you are, and a header naming somebody else is read
+    /// as an impersonation attempt rather than ignored.
+    pub user: Option<String>,
+    /// When set, the user statements run as (`X-Trino-User`), leaving [`Self::user`]
     /// as the authenticating principal.
     pub session_user: Option<String>,
     pub source: String,
@@ -56,7 +63,7 @@ pub(crate) struct SessionBuilder {
     pub(crate) host: String,
     pub(crate) port: u16,
     pub(crate) secure: bool,
-    pub(crate) user: String,
+    pub(crate) user: Option<String>,
     pub(crate) session_user: Option<String>,
     pub(crate) source: String,
     pub(crate) trace_token: Option<String>,
@@ -83,11 +90,27 @@ pub(crate) struct SessionBuilder {
 
 impl SessionBuilder {
     pub fn new(user: impl ToString, host: impl ToString) -> SessionBuilder {
+        Self::for_user(Some(user.to_string()), host)
+    }
+
+    /// A session that sends no `X-Trino-User`, leaving the user to be taken
+    /// from the authenticated identity.
+    ///
+    /// Only meaningful with authentication configured; [`ClientBuilder::build`]
+    /// rejects the combination of no user and no authentication, because Trino
+    /// would answer `User must be set`.
+    ///
+    /// [`ClientBuilder::build`]: crate::client::ClientBuilder::build
+    pub fn without_user(host: impl ToString) -> SessionBuilder {
+        Self::for_user(None, host)
+    }
+
+    fn for_user(user: Option<String>, host: impl ToString) -> SessionBuilder {
         SessionBuilder {
             host: host.to_string(),
             port: 80,
             secure: false,
-            user: user.to_string(),
+            user,
             session_user: None,
             source: "trino-rust-client".to_string(),
             trace_token: None,

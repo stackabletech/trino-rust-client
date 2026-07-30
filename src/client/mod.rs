@@ -72,8 +72,16 @@ fn add_prepare_header(mut builder: RequestBuilder, session: &Session) -> Request
     // The session user is who the statement runs as. Authentication still uses
     // the connection principal, so the two differing is impersonation, which
     // the coordinator only permits if that principal holds `impersonate`.
-    let user = session.session_user.as_ref().unwrap_or(&session.user);
-    builder = builder.header(HEADER_USER, user);
+    //
+    // With neither set the header is omitted, and Trino takes the user from the
+    // authenticated identity instead. That is the correct shape for interactive
+    // OAuth 2.0: the identity provider decides who you are, and sending a name
+    // that disagrees with it is read as an impersonation attempt rather than
+    // ignored -- so a header we invented would be refused for the user's own
+    // account.
+    if let Some(user) = session.session_user.as_ref().or(session.user.as_ref()) {
+        builder = builder.header(HEADER_USER, user);
+    }
     // TODO: difference with session.source?
     builder = builder.header(USER_AGENT, "trino-rust-client");
     if session.compression_disabled {

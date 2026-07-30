@@ -15,6 +15,12 @@ pub enum Error {
     Forbidden { message: String },
     #[error("basic auth can not be used with http")]
     BasicAuthWithHttp,
+    /// Built without a user and without authentication, so nothing establishes
+    /// the identity: Trino would answer `User must be set`. Give a user with
+    /// [`ClientBuilder::new`](crate::client::ClientBuilder::new), or configure
+    /// authentication.
+    #[error("a client built without a user needs authentication to establish one")]
+    MissingUser,
     #[error("http error, reason: {0}")]
     HttpError(#[source] Box<reqwest::Error>),
     #[error("http not ok, code: {0}, reason: {1}")]

@@ -54,7 +54,27 @@ impl ClientBuilder {
     /// Defaults: port 8080, plain HTTP, no authentication. Use the setters to
     /// change them, then call [`build`](ClientBuilder::build).
     pub fn new(user: impl ToString, host: impl ToString) -> Self {
-        let builder = SessionBuilder::new(user, host);
+        Self::from_session(SessionBuilder::new(user, host))
+    }
+
+    /// Start building a client that sends no `X-Trino-User`, leaving the user
+    /// to be taken from the authenticated identity.
+    ///
+    /// For interactive OAuth 2.0, where the identity provider decides who you
+    /// are: Trino falls back to the authenticated identity when the header is
+    /// absent, and reads a header that *disagrees* with it as an impersonation
+    /// attempt. Authentication is therefore required —
+    /// [`build`](ClientBuilder::build) rejects a client with neither, because
+    /// Trino would answer `User must be set`.
+    ///
+    /// Use [`session_user`](ClientBuilder::session_user) for deliberate
+    /// impersonation, which is a different thing: it names somebody to run as
+    /// while still authenticating as yourself.
+    pub fn without_user(host: impl ToString) -> Self {
+        Self::from_session(SessionBuilder::without_user(host))
+    }
+
+    fn from_session(builder: SessionBuilder) -> Self {
         Self {
             session: builder,
             auth: None,
@@ -379,6 +399,15 @@ impl ClientBuilder {
 
         if (self.auth.is_some() && session.url.scheme() == "http") && !self.auth_http_insecure {
             return Err(Error::BasicAuthWithHttp);
+        }
+
+        // Omitting `X-Trino-User` only works when something else establishes the
+        // identity. Trino's own rule is that the user falls back to the
+        // authenticated one, and that a request carrying neither is rejected
+        // with `User must be set`, so catch it here rather than on the first
+        // query, where it would surface as an opaque 400.
+        if session.user.is_none() && session.session_user.is_none() && self.auth.is_none() {
+            return Err(Error::MissingUser);
         }
 
         let mut client_builder =

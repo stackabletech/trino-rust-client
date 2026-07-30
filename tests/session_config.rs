@@ -1,6 +1,8 @@
 //! Session configuration that `ClientBuilder` can set must actually reach the
 //! wire. Each test asserts the exact header value the coordinator receives.
 use serde_json::json;
+use trino_rust_client::auth::Auth;
+use trino_rust_client::error::Error;
 use trino_rust_client::selected_role::{RoleType, SelectedRole};
 use trino_rust_client::{client::ClientBuilder, Row, Tz};
 use wiremock::matchers::{method, path};
@@ -161,4 +163,72 @@ async fn locale_is_sent() {
             .unwrap(),
         "de-DE"
     );
+}
+
+// ---------------------------------------------------------------------------
+// X-Trino-User
+//
+// Trino reads the header as optional whenever a request carries an
+// authenticated identity, and reads one that *disagrees* with that identity as
+// an impersonation request. So a client authenticating interactively -- OAuth
+// 2.0, where the identity provider decides who you are -- must be able to leave
+// it off entirely, rather than inventing a name that would be refused.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn no_user_header_when_the_identity_comes_from_authentication() {
+    let (server, host, port) = mock_single_page().await;
+    let cli = ClientBuilder::without_user(host)
+        .port(port)
+        .auth(Auth::new_jwt("token"))
+        // The mock server is plain HTTP; the bearer token would otherwise be
+        // refused before the request is built.
+        .auth_http_insecure(true)
+        .build()
+        .unwrap();
+    cli.get_all::<Row>("SELECT 1").await.unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    assert!(
+        reqs[0].headers.get("x-trino-user").is_none(),
+        "X-Trino-User must be omitted so Trino takes the user from the \
+         authenticated identity; sending one that disagrees with it is read as \
+         an impersonation attempt"
+    );
+}
+
+#[tokio::test]
+async fn session_user_is_sent_without_a_user_of_its_own() {
+    let (server, host, port) = mock_single_page().await;
+    let cli = ClientBuilder::without_user(host)
+        .port(port)
+        .auth(Auth::new_jwt("token"))
+        .auth_http_insecure(true)
+        .session_user("bob")
+        .build()
+        .unwrap();
+    cli.get_all::<Row>("SELECT 1").await.unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(
+        reqs[0]
+            .headers
+            .get("x-trino-user")
+            .expect("an explicit session user is still impersonation, and is sent")
+            .to_str()
+            .unwrap(),
+        "bob"
+    );
+}
+
+/// Nothing would establish the identity, and Trino answers `User must be set`.
+/// Caught at build time rather than on the first query, where it would surface
+/// as an opaque 400.
+#[test]
+fn a_client_with_neither_a_user_nor_authentication_is_rejected() {
+    match ClientBuilder::without_user("localhost").build() {
+        Err(Error::MissingUser) => {}
+        Err(other) => panic!("expected Error::MissingUser, got {other:?}"),
+        Ok(_) => panic!("a client with no user and no authentication must not build"),
+    }
 }
