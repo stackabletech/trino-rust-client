@@ -582,7 +582,7 @@ impl Client {
     fn decode_segments<T: Trino + 'static>(
         &self,
         encoding: &str,
-        segment_bytes: Vec<Vec<u8>>,
+        segment_bytes: Vec<crate::spooling::SegmentBytes>,
         columns: Option<Vec<crate::models::Column>>,
     ) -> Result<DataSet<T>> {
         let cols = columns.ok_or_else(|| {
@@ -598,8 +598,11 @@ impl Client {
             ))
         })?;
 
-        for bytes in segment_bytes {
-            let json_str = decompress_segment_bytes(&bytes, &encoding)?;
+        for segment in segment_bytes {
+            // The size travels with the bytes because a raw LZ4 block cannot be
+            // decompressed without it, and the segment's metadata is gone by here.
+            let json_str =
+                decompress_segment_bytes(&segment.data, &encoding, segment.uncompressed_size)?;
 
             let mut rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&json_str)
                 .map_err(|e| Error::Decode(format!("Failed to parse segment JSON: {}", e)))?;

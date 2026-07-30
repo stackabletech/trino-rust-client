@@ -26,6 +26,15 @@ impl DataAttributes {
     pub fn segment_size(&self) -> Option<u64> {
         self.attributes.get("segmentSize")?.as_u64()
     }
+
+    /// The segment's size once decompressed.
+    ///
+    /// Trino sends this for every segment under a compressed encoding, and the
+    /// `json+lz4` decoder requires it: a raw LZ4 block carries no length of its
+    /// own, so the output buffer has to be sized from the metadata.
+    pub fn uncompressed_size(&self) -> Option<u64> {
+        self.attributes.get("uncompressedSize")?.as_u64()
+    }
 }
 
 // Segment is a part of a query result when using the spooling protocol

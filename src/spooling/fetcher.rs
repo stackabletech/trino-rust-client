@@ -49,6 +49,23 @@ fn default_max_concurrent_segments() -> usize {
         .max(1)
 }
 
+/// One fetched segment: its bytes as they arrived, still in the page's encoding,
+/// with the size they decompress to.
+///
+/// The two travel together because the `json+lz4` decoder needs the size and the
+/// decoding happens after the fetch, by which point the [`Segment`] and its
+/// metadata are gone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SegmentBytes {
+    /// The segment's bytes, base64-decoded for an inline segment and downloaded
+    /// for a spooled one, in both cases still compressed if the page's encoding
+    /// says so.
+    pub data: Vec<u8>,
+    /// `uncompressedSize` from the segment metadata, when the coordinator sent
+    /// it. Trino sends it for every segment under a compressed encoding.
+    pub uncompressed_size: Option<usize>,
+}
+
 // Fetcher for segments with the spooling protocol
 pub struct SegmentFetcher {
     http_client: Client,
@@ -80,9 +97,14 @@ impl SegmentFetcher {
     }
 
     /// Fetch a single segment and return the decoded data
-    pub async fn fetch_segment(&self, segment: &Segment) -> Result<Vec<u8>> {
-        match segment {
-            Inlined { data, .. } => self.fetch_inline_segment(data).await,
+    pub async fn fetch_segment(&self, segment: &Segment) -> Result<SegmentBytes> {
+        let uncompressed_size = match segment {
+            Inlined { metadata, .. } | Segment::Spooled { metadata, .. } => metadata
+                .uncompressed_size()
+                .and_then(|size| usize::try_from(size).ok()),
+        };
+        let data = match segment {
+            Inlined { data, .. } => self.fetch_inline_segment(data).await?,
             Segment::Spooled {
                 uri,
                 ack_uri,
@@ -104,21 +126,26 @@ impl SegmentFetcher {
                     }
                 }
 
-                Ok(data)
+                data
             }
-        }
+        };
+
+        Ok(SegmentBytes {
+            data,
+            uncompressed_size,
+        })
     }
 
     /// Fetch multiple segments with controlled concurrency
     /// Uses buffered concurrency to limit the number of concurrent fetches
-    pub async fn fetch_segments(&self, segments: Vec<Segment>) -> Result<Vec<Vec<u8>>> {
+    pub async fn fetch_segments(&self, segments: Vec<Segment>) -> Result<Vec<SegmentBytes>> {
         tracing::debug!(
             "Fetching {} segments with max concurrency of {}",
             segments.len(),
             self.max_concurrent_segments
         );
 
-        let results: Vec<Result<Vec<u8>>> = stream::iter(segments.into_iter().enumerate())
+        let results: Vec<Result<SegmentBytes>> = stream::iter(segments.into_iter().enumerate())
             .map(|(idx, segment)| async move {
                 // Keep the error class intact — callers match on
                 // `HttpNotOk`/`HttpError` to tell an expired presigned URL from
