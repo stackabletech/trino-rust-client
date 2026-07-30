@@ -15,9 +15,9 @@ use crate::auth::Auth;
 use crate::build_dataset;
 use crate::error::{Error, Result};
 use crate::header::*;
-use crate::models::Column;
 #[cfg(feature = "spooling")]
 use crate::models::SpooledData;
+use crate::models::{Column, QueryResultData};
 use crate::pager::QueryPager;
 use crate::retry::RetryPolicy;
 use crate::selected_role::SelectedRole;
@@ -513,6 +513,53 @@ impl Client {
             cols => Some(cols.to_vec()),
         };
         build_dataset(all_rows, columns)
+    }
+
+    /// Decode one result page's data into rows.
+    ///
+    /// A Direct page carries its rows inline and `columns` is ignored. A Spooled
+    /// page carries segment references instead: they are fetched (concurrently,
+    /// honouring the [`RetryPolicy`](crate::retry::RetryPolicy)), decoded against
+    /// `columns` and acknowledged, so the coordinator can release them.
+    ///
+    /// `columns` is the query's column metadata, which a spooled segment needs
+    /// because its values arrive without names or types. Trino may put `columns`
+    /// on a later page than the first, so a caller driving its own paging loop
+    /// keeps the first set it sees and passes it here for every page.
+    ///
+    /// This is the decoder [`QueryPager`] uses. Reach for it when a consumer must
+    /// own its paging loop, as an ODBC driver does, and [`pager`](Self::pager)
+    /// cannot be handed the loop.
+    pub async fn decode_page<T>(
+        &self,
+        data: QueryResultData<T>,
+        columns: Option<&[Column]>,
+    ) -> Result<Vec<T>>
+    where
+        T: Trino + 'static,
+        for<'de> T: serde::Deserialize<'de>,
+    {
+        match data {
+            QueryResultData::Direct(rows) => Ok(rows),
+            #[cfg(feature = "spooling")]
+            QueryResultData::Spooled(spooled) => {
+                // Decoding is column-directed, so hand over the metadata.
+                let dataset = self
+                    .fetch_spooled_data::<T>(spooled, columns.map(<[Column]>::to_vec))
+                    .await?;
+                Ok(dataset.into_vec())
+            }
+            #[cfg(not(feature = "spooling"))]
+            QueryResultData::Spooled(_) => {
+                let _ = columns;
+                Err(Error::Protocol(
+                    "server sent spooled data but the 'spooling' feature is not enabled. \
+                     Add features = [\"spooling\"] to your trino-rust-client dependency \
+                     in Cargo.toml."
+                        .to_string(),
+                ))
+            }
+        }
     }
 
     #[cfg(feature = "spooling")]

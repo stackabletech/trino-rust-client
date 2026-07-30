@@ -1,10 +1,8 @@
 //! Manual, page-at-a-time iteration over a query's results.
 
 use crate::client::{CancelOnDrop, Client};
-#[cfg(not(feature = "spooling"))]
-use crate::error::Error;
 use crate::error::Result;
-use crate::models::{Column, QueryResult, QueryResultData};
+use crate::models::{Column, QueryResult};
 use crate::Trino;
 
 /// A handle to one running query, yielding its results one page at a time.
@@ -119,33 +117,15 @@ where
                 continue;
             };
 
-            // Decoded inline rather than in a `&self` helper: holding a shared
-            // borrow of `self` across the await would require `T: Sync`, which
+            // The columns are cloned into a local before the await: holding a
+            // shared borrow of `self` across it would require `T: Sync`, which
             // would in turn make `RowStream` (built on this) non-`Send`.
-            let rows = match data {
-                QueryResultData::Direct(rows) => rows,
-                #[cfg(feature = "spooling")]
-                QueryResultData::Spooled(spooled) => {
-                    // Decoding is column-directed, so hand over the cached metadata.
-                    let columns = if self.columns.is_empty() {
-                        None
-                    } else {
-                        Some(self.columns.clone())
-                    };
-                    let client = self.client;
-                    let dataset = client.fetch_spooled_data::<T>(spooled, columns).await?;
-                    dataset.into_vec()
-                }
-                #[cfg(not(feature = "spooling"))]
-                QueryResultData::Spooled(_) => {
-                    return Err(Error::Protocol(
-                        "server sent spooled data but the 'spooling' feature is not enabled. \
-                         Add features = [\"spooling\"] to your trino-rust-client dependency \
-                         in Cargo.toml."
-                            .to_string(),
-                    ))
-                }
+            let columns = match self.columns.as_slice() {
+                [] => None,
+                cols => Some(cols.to_vec()),
             };
+            let client = self.client;
+            let rows = client.decode_page(data, columns.as_deref()).await?;
 
             if rows.is_empty() {
                 continue;
