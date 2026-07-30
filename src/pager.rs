@@ -42,7 +42,7 @@ where
     pub(crate) async fn new(client: &'a Client, sql: String) -> Result<Self> {
         // Follow pages until one carries `columns` (or data, or the query ends),
         // so `columns()` and `query_id()` are usable before the first row.
-        let mut res = client.get_retry::<T>(sql).await?;
+        let mut res = client.get::<T>(sql).await?;
         loop {
             if let Some(error) = res.error.take() {
                 return Err(error.into());
@@ -51,7 +51,7 @@ where
                 break;
             }
             match res.next_uri.clone() {
-                Some(url) => res = client.get_next_retry::<T>(&url).await?,
+                Some(url) => res = client.get_next::<T>(&url).await?,
                 None => break,
             }
         }
@@ -90,7 +90,7 @@ where
             let mut res = match self.pending.take() {
                 Some(res) => res,
                 None => match self.next_uri.take() {
-                    Some(url) => self.client.get_next_retry::<T>(&url).await?,
+                    Some(url) => self.client.get_next::<T>(&url).await?,
                     None => {
                         // Finished normally — nothing to cancel.
                         self.cancel = None;

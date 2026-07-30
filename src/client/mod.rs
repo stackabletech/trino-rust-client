@@ -626,7 +626,7 @@ impl Client {
      * */
     #[tracing::instrument(skip_all, fields(query_id = tracing::field::Empty))]
     pub async fn execute(&self, sql: impl Into<String>) -> Result<ExecuteResult> {
-        let mut res = self.get_retry::<Row>(sql.into()).await?;
+        let mut res = self.get::<Row>(sql.into()).await?;
         tracing::Span::current().record("query_id", res.id.as_str());
 
         // Drive the statement to completion, keeping the terminal page: it
@@ -634,7 +634,7 @@ impl Client {
         // re-fetch afterwards. Re-fetching used to skip auth and the retry
         // policy, which made one transient failure fatal to the statement.
         while let Some(url) = res.next_uri.clone() {
-            res = self.get_next_retry::<Row>(&url).await?;
+            res = self.get_next::<Row>(&url).await?;
         }
 
         if let Some(error) = res.error {
@@ -792,34 +792,6 @@ impl Client {
         self.retry.backoff()
     }
 
-    pub(crate) async fn get_retry<T>(&self, sql: String) -> Result<QueryResult<T>>
-    where
-        T: Trino + 'static,
-        for<'de> T: serde::Deserialize<'de>,
-    {
-        let result = || async { self.get::<T>(sql.clone()).await };
-
-        // Submission is not idempotent — retry only when definitely not processed.
-        result
-            .retry(self.retry_policy())
-            .when(need_retry_submit)
-            .await
-    }
-
-    pub(crate) async fn get_next_retry<T>(&self, url: &str) -> Result<QueryResult<T>>
-    where
-        T: Trino + 'static,
-        for<'de> T: serde::Deserialize<'de>,
-    {
-        let result = || async { self.get_next(url).await };
-
-        // Page fetches are idempotent GETs — any transient failure is retryable.
-        result
-            .retry(self.retry_policy())
-            .when(need_retry_fetch)
-            .await
-    }
-
     /// Everything needed to fire a best-effort cancellation for `query_id`
     /// without borrowing `self`.
     pub(crate) fn cancel_on_drop(&self, query_id: &str) -> CancelOnDrop {
@@ -857,7 +829,29 @@ impl Client {
     /// `next_uri` that you must follow with [`get_next`](Client::get_next) to
     /// retrieve the rest. Most callers should use [`get_all`](Client::get_all)
     /// or [`stream`](Client::stream), which handle pagination.
+    ///
+    /// Retried under the client's [`RetryPolicy`](crate::retry::RetryPolicy), but
+    /// only when the submit was definitely not processed: a connect failure, or a
+    /// 503, which the coordinator sends when it rejects a request without looking
+    /// at it. A timeout or a 502 from an intermediary is ambiguous, since the
+    /// query may already be running, and re-sending it could run a
+    /// non-idempotent statement twice.
     pub async fn get<T>(&self, sql: impl Into<String>) -> Result<QueryResult<T>>
+    where
+        T: Trino + 'static,
+        for<'de> T: serde::Deserialize<'de>,
+    {
+        let sql = sql.into();
+        let attempt = || async { self.get_once::<T>(sql.clone()).await };
+        attempt
+            .retry(self.retry_policy())
+            .when(need_retry_submit)
+            .await
+    }
+
+    /// One `POST /v1/statement`, with no retry. [`get`](Self::get) is the
+    /// retrying entry point every caller should use.
+    async fn get_once<T>(&self, sql: String) -> Result<QueryResult<T>>
     where
         T: Trino + 'static,
         for<'de> T: serde::Deserialize<'de>,
@@ -865,7 +859,7 @@ impl Client {
         let req = self
             .client
             .post(format!("{}v1/statement", self.url))
-            .body(sql.into());
+            .body(sql);
         let req = {
             let session = self.session.read().await;
             add_session_header(req, &session)
@@ -883,7 +877,24 @@ impl Client {
 
     /// Fetch the next result page from a `next_uri` returned by a previous
     /// [`get`](Client::get) / `get_next` call.
+    ///
+    /// A page fetch is an idempotent GET, so any transient failure is retried
+    /// under the client's [`RetryPolicy`](crate::retry::RetryPolicy).
     pub async fn get_next<T>(&self, url: &str) -> Result<QueryResult<T>>
+    where
+        T: Trino + 'static,
+        for<'de> T: serde::Deserialize<'de>,
+    {
+        let attempt = || async { self.get_next_once::<T>(url).await };
+        attempt
+            .retry(self.retry_policy())
+            .when(need_retry_fetch)
+            .await
+    }
+
+    /// One `GET` of a `next_uri`, with no retry. [`get_next`](Self::get_next) is
+    /// the retrying entry point every caller should use.
+    async fn get_next_once<T>(&self, url: &str) -> Result<QueryResult<T>>
     where
         T: Trino + 'static,
         for<'de> T: serde::Deserialize<'de>,
