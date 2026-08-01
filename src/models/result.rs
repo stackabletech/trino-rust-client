@@ -88,7 +88,15 @@ pub struct QueryResult<T: Trino> {
 
     pub error: Option<QueryError>,
 
+    /// Both are informational, and defaulted for the reason [`Stat`] documents:
+    /// a page that reports no statistics and raises no warnings still carries
+    /// the rows, the error and the `nextUri` that decide what happens next.
+    /// `id` and `info_uri` stay required, a page identifying no query is
+    /// malformed, and `id` is what [`Client::cancel`](crate::Client::cancel)
+    /// needs.
+    #[serde(default)]
     pub stats: Stat,
+    #[serde(default)]
     pub warnings: Vec<Warning>,
 
     pub update_type: Option<String>,
@@ -100,6 +108,47 @@ mod tests {
     use super::*;
     use crate::error::Error;
     use crate::Row;
+
+    /// A minimal well-formed page: the fields that identify the query, and
+    /// nothing that is only reported for observability.
+    const MINIMAL_PAGE: &str = r#"{
+        "id": "20260801_000000_00000_abcde",
+        "infoUri": "http://coordinator/ui/query.html",
+        "stats": {"state": "FINISHED", "queued": false, "scheduled": false,
+                  "nodes": 0, "totalSplits": 0, "queuedSplits": 0,
+                  "runningSplits": 0, "completedSplits": 0, "cpuTimeMillis": 0,
+                  "wallTimeMillis": 0, "queuedTimeMillis": 0,
+                  "elapsedTimeMillis": 0, "processedRows": 0,
+                  "processedBytes": 0, "peakMemoryBytes": 0, "spilledBytes": 0}
+    }"#;
+
+    // `warnings` carries nothing the client acts on, so a producer that omits
+    // it must not fail the whole query. Trino always sends it; a gateway,
+    // proxy or test double in front of one need not.
+    #[test]
+    fn query_result_decodes_when_warnings_is_absent() {
+        let res: QueryResult<Row> =
+            serde_json::from_str(MINIMAL_PAGE).expect("a page without warnings decodes");
+        assert!(res.warnings.is_empty());
+    }
+
+    // `stats` is reported for observability and read by nobody, so the same
+    // applies to the whole object.
+    #[test]
+    fn query_result_decodes_when_stats_is_absent() {
+        let json = r#"{"id": "q", "infoUri": "http://c/ui", "warnings": []}"#;
+        let res: QueryResult<Row> =
+            serde_json::from_str(json).expect("a page without stats decodes");
+        assert_eq!(res.stats.state, "");
+    }
+
+    // A page that identifies no query is genuinely malformed: `id` is what
+    // `Client::cancel` needs, so this one must keep failing.
+    #[test]
+    fn query_result_still_requires_the_query_id() {
+        let json = r#"{"infoUri": "http://c/ui", "warnings": []}"#;
+        assert!(serde_json::from_str::<QueryResult<Row>>(json).is_err());
+    }
 
     #[test]
     fn into_vec_returns_direct_rows() {
