@@ -70,7 +70,12 @@ impl Ssl {
         Self::default()
     }
 
-    /// Trust `cert` in addition to the platform's roots.
+    /// Trust `cert`, and only `cert`, as the root of the coordinator's chain.
+    ///
+    /// It replaces the platform's roots rather than joining them: naming a
+    /// private CA is a pin, and a pin that still accepted every public CA
+    /// would not be one. A coordinator with a publicly issued certificate
+    /// needs no root certificate at all.
     pub fn root_cert(mut self, cert: Certificate) -> Self {
         self.root_cert = Some(cert);
         self

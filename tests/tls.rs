@@ -55,6 +55,20 @@ fn ca_only_without_a_root_certificate_is_rejected() {
 }
 
 #[test]
+fn full_builds_with_a_root_certificate() {
+    // Full with a named root makes the same `tls_certs_only` call CaOnly does,
+    // so this covers that the composition is accepted. What the trust store
+    // then holds is not observable from the built client; that is
+    // `a_named_root_replaces_the_platform_roots` below.
+    ClientBuilder::new("u", "localhost")
+        .secure(true)
+        .ssl(Ssl::new().root_cert(Ssl::read_pem(&TEST_CA).unwrap()))
+        .tls_verification(TlsVerification::Full)
+        .build()
+        .expect("Full with a root certificate must build");
+}
+
+#[test]
 fn a_malformed_identity_is_rejected() {
     let err = Identity::from_pem(b"not a pem").unwrap_err();
     assert!(
@@ -142,4 +156,68 @@ async fn ca_only_skips_hostname_verification() {
         .get_all::<Row>("SELECT 1")
         .await
         .expect("CaOnly must accept a hostname mismatch with a trusted chain");
+}
+
+/// A named root is the whole trust store, so a chain the *platform* trusts is
+/// refused when the caller named something else. Verifying that needs a
+/// coordinator whose CA is in the platform store, which no unit test may
+/// arrange: installing a CA machine-wide is not a thing a test does to the
+/// machine it runs on.
+///
+/// The Windows VM in the `stackable-odbc-trino` harness is already in that
+/// state, because its OAuth2 browser login needs the test CA in
+/// `Cert:\LocalMachine\Root`. That is where this is exercised for real, by
+/// that repository's `integration-tests/suites/test_tls.py`. To drive it from
+/// here:
+///
+/// ```bash
+/// # A CA the platform trusts, and a coordinator it signed.
+/// sudo cp integration-tests/generated/certs/ca.crt \
+///     /usr/local/share/ca-certificates/trino-test-ca.crt
+/// sudo update-ca-certificates
+///
+/// # TRINO_TLS_UNRELATED is a leaf that CA signed, so it is a valid
+/// # certificate but not a trust anchor: it signed nothing.
+/// TRINO_TLS_HOST=localhost TRINO_TLS_PORT=8443 \
+///     TRINO_TLS_UNRELATED=integration-tests/generated/certs/keycloak.crt \
+///     cargo test --test tls -- --ignored a_named_root_replaces_the_platform_roots
+/// ```
+#[tokio::test]
+#[ignore = "needs a coordinator whose CA is in the platform trust store; see the doc comment"]
+async fn a_named_root_replaces_the_platform_roots() {
+    use trino_rust_client::Row;
+
+    let host = std::env::var("TRINO_TLS_HOST").expect("TRINO_TLS_HOST");
+    let port: u16 = std::env::var("TRINO_TLS_PORT")
+        .expect("TRINO_TLS_PORT")
+        .parse()
+        .expect("TRINO_TLS_PORT must be a u16");
+    let unrelated = std::env::var("TRINO_TLS_UNRELATED").expect("TRINO_TLS_UNRELATED");
+
+    // No root named: the platform's store applies, and it trusts this chain.
+    let platform = ClientBuilder::new("u", &host)
+        .port(port)
+        .secure(true)
+        .tls_verification(TlsVerification::Full)
+        .build()
+        .unwrap();
+    platform
+        .get_all::<Row>("SELECT 1")
+        .await
+        .expect("the platform store must trust this coordinator, or the test proves nothing");
+
+    // The same chain, with a certificate named that did not sign it. Falling
+    // back to the platform store here is exactly what must not happen.
+    let pinned = ClientBuilder::new("u", &host)
+        .port(port)
+        .secure(true)
+        .ssl(Ssl::new().root_cert(Ssl::read_pem(&unrelated).unwrap()))
+        .tls_verification(TlsVerification::Full)
+        .build()
+        .unwrap();
+    assert!(
+        pinned.get_all::<Row>("SELECT 1").await.is_err(),
+        "Full accepted a chain the named root did not sign, so the platform's \
+         roots were still in the trust store"
+    );
 }

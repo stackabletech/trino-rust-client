@@ -413,30 +413,38 @@ impl ClientBuilder {
         let mut client_builder =
             reqwest::ClientBuilder::new().timeout(session.client_request_timeout);
 
-        // `CaOnly` is the awkward one: under rustls, reqwest refuses to skip
-        // hostname verification unless the trust store was supplied through
-        // `tls_certs_only`, and that call replaces the native roots outright.
-        // The mode therefore requires an explicitly configured root certificate.
+        // A root certificate names *the* trust anchor, so it replaces the
+        // platform's roots rather than joining them. Adding to them would leave
+        // a caller who pinned a private CA still accepting whatever any public
+        // CA issued for the same host, and would make verification depend on
+        // what the machine happens to trust.
+        //
+        // `CaOnly` needs an explicit store for a second reason: under rustls,
+        // reqwest refuses to skip hostname verification unless the store was
+        // supplied through `tls_certs_only`. Hence its requirement for a root
+        // certificate, and the error when it has none.
         let root_cert = self.ssl.as_ref().and_then(|s| s.root_cert.as_ref());
-        if self.tls_verification == TlsVerification::CaOnly {
-            let root = root_cert.ok_or_else(|| {
-                Error::Tls(
+        if self.tls_verification == TlsVerification::None {
+            client_builder = client_builder.tls_danger_accept_invalid_certs(true);
+        }
+        match (root_cert, self.tls_verification) {
+            (Some(root), mode) => {
+                client_builder = client_builder.tls_certs_only([root.0.clone()]);
+                if mode == TlsVerification::CaOnly {
+                    client_builder = client_builder.tls_danger_accept_invalid_hostnames(true);
+                }
+            }
+            (None, TlsVerification::CaOnly) => {
+                return Err(Error::Tls(
                     "TlsVerification::CaOnly requires a root certificate: skipping hostname \
                      verification under rustls replaces the trust store, so the platform's \
                      roots are not available. Supply one with Ssl::root_cert."
                         .to_string(),
-                )
-            })?;
-            client_builder = client_builder
-                .tls_certs_only([root.0.clone()])
-                .tls_danger_accept_invalid_hostnames(true);
-        } else {
-            if self.tls_verification == TlsVerification::None {
-                client_builder = client_builder.tls_danger_accept_invalid_certs(true);
+                ));
             }
-            if let Some(root) = root_cert {
-                client_builder = client_builder.add_root_certificate(root.0.clone());
-            }
+            // Nothing named, so the platform's roots are the trust store,
+            // which is what a publicly issued coordinator certificate needs.
+            (None, _) => {}
         }
 
         if let Some(identity) = self.ssl.as_ref().and_then(|s| s.identity.as_ref()) {
