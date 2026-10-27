@@ -2,19 +2,19 @@
 proc-macro2 = "1.0"
 quote = "1.0"
 structmeta = "0.3.0"
-syn = { version = "2.0.104", features = ["default", "extra-traits", "full"] }
+syn = {version = "2.0.104", features = ["default", "extra-traits", "full"]}
 
 [lib]
 proc-macro = true
 
 [package]
-authors = { workspace = true }
+authors = {workspace = true}
 description = "trino rust client macros"
-documentation = { workspace = true }
-edition = { workspace = true }
-homepage = { workspace = true }
+documentation = {workspace = true}
+edition = {workspace = true}
+homepage = {workspace = true}
 keywords = ["trino"]
-license = { workspace = true }
+license = {workspace = true}
 name = "trino-rust-client-macros"
-repository = { workspace = true }
+repository = {workspace = true}
 version = "0.7.2"

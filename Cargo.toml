@@ -1,40 +1,40 @@
 [dependencies]
-async-stream = { workspace = true }
-backon = { workspace = true }
-base64 = { workspace = true }
-bigdecimal = { workspace = true }
-chrono = { workspace = true }
-chrono-tz = { workspace = true }
-derive_more = { workspace = true }
-flate2 = { workspace = true, optional = true }
-futures = { workspace = true }
-http = { workspace = true }
-iterable = { workspace = true }
-lazy_static = { workspace = true }
-lz4 = { workspace = true, optional = true }
-open = { workspace = true }
-paste = { workspace = true }
-regex = { workspace = true }
+async-stream = {workspace = true}
+backon = {workspace = true}
+base64 = {workspace = true}
+bigdecimal = {workspace = true}
+chrono = {workspace = true}
+chrono-tz = {workspace = true}
+derive_more = {workspace = true}
+flate2 = {workspace = true, optional = true}
+futures = {workspace = true}
+http = {workspace = true}
+iterable = {workspace = true}
+lazy_static = {workspace = true}
+lz4 = {workspace = true, optional = true}
+open = {workspace = true}
+paste = {workspace = true}
+regex = {workspace = true}
 # network dependencies
-reqwest = { workspace = true }
+reqwest = {workspace = true}
 # third party dependencies
-serde = { workspace = true }
-serde_json = { workspace = true }
-thiserror = { workspace = true }
-tokio = { workspace = true }
-tracing = { workspace = true }
+serde = {workspace = true}
+serde_json = {workspace = true}
+thiserror = {workspace = true}
+tokio = {workspace = true}
+tracing = {workspace = true}
 # self dependencies
-trino-rust-client-macros = { workspace = true }
-url = { workspace = true }
-uuid = { workspace = true }
-zstd = { workspace = true, optional = true }
+trino-rust-client-macros = {workspace = true}
+url = {workspace = true}
+uuid = {workspace = true}
+zstd = {workspace = true, optional = true}
 
 [dev-dependencies]
 dotenvy = "0.15"
 maplit = "1.0"
 # The library itself only needs a minimal tokio; tests and examples need the
 # runtime, macros and timers.
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio = {workspace = true, features = ["macros", "rt-multi-thread", "time"]}
 trybuild = "1.0.112"
 wiremock = "0.6.5"
 
@@ -48,18 +48,18 @@ default = []
 spooling = ["dep:zstd", "dep:lz4", "dep:flate2"]
 
 [package]
-authors = { workspace = true }
+authors = {workspace = true}
 description = "A trino client library"
-documentation = { workspace = true }
-edition = { workspace = true }
-homepage = { workspace = true }
+documentation = {workspace = true}
+edition = {workspace = true}
+homepage = {workspace = true}
 keywords = ["trino"]
-license = { workspace = true }
+license = {workspace = true}
 name = "trino-rust-client"
 readme = "README.md"
-repository = { workspace = true }
-rust-version = { workspace = true }
-version = { workspace = true }
+repository = {workspace = true}
+rust-version = {workspace = true}
+version = {workspace = true}
 
 [package.metadata.docs.rs]
 # Build docs on docs.rs with every feature so the spooling API is included.
@@ -80,7 +80,7 @@ base64 = "0.22"
 bigdecimal = "0.4.10"
 chrono = "0.4.45"
 chrono-tz = "0.10.4"
-derive_more = { version = "2.1.1", features = ["full"] }
+derive_more = {version = "2.1.1", features = ["full"]}
 flate2 = "1.1.9"
 futures = "0.3.33"
 http = "1.4.2"
@@ -90,16 +90,16 @@ lz4 = "1.28"
 open = "5"
 paste = "1.0.15"
 regex = "1.13.1"
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "json"] }
-serde = { version = "1.0", features = ["derive"] }
+reqwest = {version = "0.13.4", default-features = false, features = ["rustls", "json"]}
+serde = {version = "1.0", features = ["derive"]}
 serde_json = "1.0.150"
 thiserror = "2.0.18"
-tokio = { version = "1.53", features = ["rt", "sync"] }
+tokio = {version = "1.53", features = ["rt", "sync"]}
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "env-filter"] }
-trino-rust-client-macros = { version = "0.7.2", path = "trino-rust-client-macros" }
+tracing-subscriber = {version = "0.3.23", default-features = false, features = ["fmt", "env-filter"]}
+trino-rust-client-macros = {version = "0.7.2", path = "trino-rust-client-macros"}
 url = "2.5.8"
-uuid = { version = "1.24.0", features = ["serde", "v4"] }
+uuid = {version = "1.24.0", features = ["serde", "v4"]}
 zstd = "0.14"
 
 [workspace.package]

@@ -1,18 +1,18 @@
 [dependencies]
-futures = { workspace = true }
-reqwest = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-trino-rust-client = { path = "..", features = ["spooling"] }
-uuid = { workspace = true }
+futures = {workspace = true}
+reqwest = {workspace = true}
+tokio = {workspace = true, features = ["macros", "rt-multi-thread"]}
+tracing = {workspace = true}
+tracing-subscriber = {workspace = true}
+trino-rust-client = {path = "..", features = ["spooling"]}
+uuid = {workspace = true}
 
 [package]
-authors = { workspace = true }
-edition = { workspace = true }
-homepage = { workspace = true }
-license = { workspace = true }
+authors = {workspace = true}
+edition = {workspace = true}
+homepage = {workspace = true}
+license = {workspace = true}
 name = "trino-integration-tests"
 publish = false
-repository = { workspace = true }
-version = { workspace = true }
+repository = {workspace = true}
+version = {workspace = true}
